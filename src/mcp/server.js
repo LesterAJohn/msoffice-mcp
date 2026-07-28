@@ -125,7 +125,7 @@ function makeScopeModel({ appName, defaultUserId, userId }) {
   };
 }
 
-export function createMcpServer({ name, version, graphClient, appName, defaultUserId, adminAuthKey, allowSensitiveOutput }) {
+export function createMcpServer({ name, version, graphClient, office365Client, appName, defaultUserId, adminAuthKey, allowSensitiveOutput }) {
   const server = new McpServer({ name, version });
 
   const connectionInfo = () => ({
@@ -297,6 +297,292 @@ export function createMcpServer({ name, version, graphClient, appName, defaultUs
         useBetaBaseUrl
       })
     }))
+  );
+
+  server.tool(
+    "office365_activity_connection_info",
+    toolText({
+      summary: "Return Office 365 Management Activity API runtime metadata and tenant scope defaults.",
+      useWhen: "you need to confirm the base URL, default tenant, publisher identifier, or token model before a subscription or content call",
+      doNotUseWhen: "you need live content or subscription data; use the specific Office 365 activity tools instead",
+      permissions: "none",
+      environment: "reports the resolved activity API base URL and default scope values",
+      parameters: "none",
+      response: "ok/status/data with server and Office 365 connection details",
+      failures: "500 if metadata assembly fails",
+      safety: "",
+      prerequisite: "none",
+      followUp: "office365_activity_list_content_types, office365_activity_list_subscriptions",
+      example: '{"name":"office365_activity_connection_info","arguments":{}}'
+    }),
+    {},
+    withErrorHandling(allowSensitiveOutput, async () => ({
+      ok: true,
+      status: 200,
+      data: {
+        server: {
+          name,
+          version,
+          adminAuthConfigured: Boolean(adminAuthKey),
+          allowSensitiveOutput: Boolean(allowSensitiveOutput),
+          scopeModel: makeScopeModel({ appName, defaultUserId })
+        },
+        office365: office365Client.getConnectionInfo()
+      }
+    }))
+  );
+
+  server.tool(
+    "office365_activity_scope_info",
+    toolText({
+      summary: "Return the effective tenant and publisher scope used by Office 365 Management Activity API calls.",
+      useWhen: "you need to know which tenant and publisher identifier a request will target",
+      doNotUseWhen: "you only need the runtime metadata; use office365_activity_connection_info instead",
+      permissions: "none",
+      environment: "defaults tenantId and publisherIdentifier from environment when omitted",
+      parameters: "tenantId (optional string), publisherIdentifier (optional string), userId (optional string)",
+      response: "ok/status/data with tenantId, publisherIdentifier, and token scope details",
+      failures: "400 if tenant validation fails, 500 on normalization errors",
+      safety: "",
+      prerequisite: "none",
+      followUp: "office365_activity_list_content_types, office365_activity_list_subscriptions",
+      example: '{"name":"office365_activity_scope_info","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","publisherIdentifier":"11111111-1111-1111-1111-111111111111"}}'
+    }),
+    { tenantId: z.string().min(1).optional(), publisherIdentifier: z.string().min(1).optional(), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, publisherIdentifier, userId }) => ({
+      ok: true,
+      status: 200,
+      data: office365Client.scope({ tenantId, publisherIdentifier, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_activity_list_content_types",
+    toolText({
+      summary: "List the supported Office 365 Management Activity content types.",
+      useWhen: "you need to discover which content types can be subscribed to or queried",
+      doNotUseWhen: "you already know the target content type and want a subscription or content call",
+      permissions: "none",
+      environment: "static catalog bundled with the current build",
+      parameters: "none",
+      response: "ok/status/data.contentTypes",
+      failures: "500 if the catalog cannot be produced",
+      safety: "",
+      prerequisite: "office365_activity_connection_info",
+      followUp: "office365_activity_start_subscription, office365_activity_list_available_content",
+      example: '{"name":"office365_activity_list_content_types","arguments":{}}'
+    }),
+    {},
+    withErrorHandling(allowSensitiveOutput, async () => ({
+      ok: true,
+      status: 200,
+      data: { contentTypes: office365Client.listContentTypes() }
+    }))
+  );
+
+  server.tool(
+    "office365_activity_list_subscriptions",
+    toolText({
+      summary: "List current Office 365 Management Activity subscriptions.",
+      useWhen: "you need to inspect current subscription and webhook state",
+      doNotUseWhen: "you need to modify a subscription; use start or stop instead",
+      permissions: "a valid Office 365 Management Activity token",
+      environment: "targets the tenant-scoped subscriptions/list endpoint",
+      parameters: "tenantId (required string), publisherIdentifier (optional string), userId (optional string)",
+      response: "ok/status/data with the current subscriptions array",
+      failures: "401/403 invalid token or missing ActivityFeed.Read, 404 invalid tenant, 429 rate limiting, 5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_activity_connection_info",
+      followUp: "office365_activity_list_available_content, office365_activity_api_request",
+      example: '{"name":"office365_activity_list_subscriptions","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000"}}'
+    }),
+    { tenantId: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, publisherIdentifier, userId }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.listSubscriptions({ tenantId, publisherIdentifier, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_activity_start_subscription",
+    toolText({
+      summary: "Start or update an Office 365 Management Activity subscription.",
+      useWhen: "you want to begin retrieving content blobs for a tenant and content type or attach or update a webhook",
+      doNotUseWhen: "you only need to inspect existing subscriptions; use list subscriptions instead",
+      permissions: "MCP_ADMIN_AUTH_KEY when configured and a valid Office 365 Management Activity token",
+      environment: "POSTs to /subscriptions/start with the tenant-scoped root and contentType query parameter",
+      parameters: "tenantId (required string), contentType (required string), publisherIdentifier (optional string), webhook (optional object with address, authId, expiration), userId (optional string), authorizationKey (optional string)",
+      response: "ok/status/data with the subscription and webhook state",
+      failures: "401 when admin authorization is required, 400 invalid content type or webhook, 403 ActivityFeed.Read missing, 409/429 upstream throttling or state errors",
+      safety: "this mutates tenant subscription state and can trigger webhook validation",
+      prerequisite: "office365_activity_list_content_types",
+      followUp: "office365_activity_list_subscriptions, office365_activity_list_available_content",
+      example: '{"name":"office365_activity_start_subscription","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","contentType":"Audit.SharePoint"}}'
+    }),
+    { tenantId: z.string().min(1), contentType: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), webhook: z.object({ address: z.string().min(1), authId: z.string().min(1).optional(), expiration: z.union([z.string(), z.null()]).optional() }).optional(), userId: z.string().min(1).optional(), authorizationKey: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, contentType, publisherIdentifier, webhook, userId, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await office365Client.startSubscription({ tenantId, contentType, publisherIdentifier, webhook, userId })
+      };
+    })
+  );
+
+  server.tool(
+    "office365_activity_stop_subscription",
+    toolText({
+      summary: "Stop an Office 365 Management Activity subscription.",
+      useWhen: "you need to stop notifications and content retrieval for a tenant/content type subscription",
+      doNotUseWhen: "you need to keep receiving content; use list or content tools instead",
+      permissions: "MCP_ADMIN_AUTH_KEY when configured and a valid Office 365 Management Activity token",
+      environment: "POSTs to /subscriptions/stop with the tenant-scoped root and contentType query parameter",
+      parameters: "tenantId (required string), contentType (required string), publisherIdentifier (optional string), userId (optional string), authorizationKey (optional string)",
+      response: "ok/status/data with the stop result",
+      failures: "401 when admin authorization is required, 400 invalid content type, 403 ActivityFeed.Read missing, 404 no subscription found, 429/5xx upstream errors",
+      safety: "this stops retrieval for the specified subscription and drops access to future content until restarted",
+      prerequisite: "office365_activity_list_subscriptions",
+      followUp: "office365_activity_start_subscription, office365_activity_list_available_content",
+      example: '{"name":"office365_activity_stop_subscription","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","contentType":"Audit.SharePoint"}}'
+    }),
+    { tenantId: z.string().min(1), contentType: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), userId: z.string().min(1).optional(), authorizationKey: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, contentType, publisherIdentifier, userId, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await office365Client.stopSubscription({ tenantId, contentType, publisherIdentifier, userId })
+      };
+    })
+  );
+
+  server.tool(
+    "office365_activity_list_available_content",
+    toolText({
+      summary: "List available Office 365 content blobs for a tenant and content type.",
+      useWhen: "you need to discover which content blob URIs are ready for retrieval",
+      doNotUseWhen: "you only need notification history; use the notifications tool instead",
+      permissions: "a valid Office 365 Management Activity token",
+      environment: "GETs /subscriptions/content with optional startTime and endTime window validation",
+      parameters: "tenantId (required string), contentType (required string), publisherIdentifier (optional string), startTime (optional datetime), endTime (optional datetime), userId (optional string)",
+      response: "ok/status/data with a content array and NextPageUri when paginated",
+      failures: "401/403 invalid token or missing ActivityFeed.Read, 400 invalid content type or time window, 404 disabled subscription, 429/5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_activity_start_subscription",
+      followUp: "office365_activity_get_content, office365_activity_list_notifications",
+      example: '{"name":"office365_activity_list_available_content","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","contentType":"Audit.SharePoint"}}'
+    }),
+    { tenantId: z.string().min(1), contentType: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), startTime: z.union([z.string(), z.null()]).optional(), endTime: z.union([z.string(), z.null()]).optional(), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, contentType, publisherIdentifier, startTime, endTime, userId }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.listContent({ tenantId, contentType, publisherIdentifier, startTime, endTime, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_activity_list_notifications",
+    toolText({
+      summary: "List Office 365 notification attempts for a tenant and content type.",
+      useWhen: "you are investigating webhook delivery history or retry behavior",
+      doNotUseWhen: "you need to determine what content is available right now; use list available content instead",
+      permissions: "a valid Office 365 Management Activity token",
+      environment: "GETs /subscriptions/notifications with optional startTime and endTime window validation",
+      parameters: "tenantId (required string), contentType (required string), publisherIdentifier (optional string), startTime (optional datetime), endTime (optional datetime), userId (optional string)",
+      response: "ok/status/data with a notification array and NextPageUri when paginated",
+      failures: "401/403 invalid token or missing ActivityFeed.Read, 400 invalid content type or time window, 404 disabled subscription, 429/5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_activity_start_subscription",
+      followUp: "office365_activity_get_content, office365_activity_api_request",
+      example: '{"name":"office365_activity_list_notifications","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","contentType":"Audit.SharePoint"}}'
+    }),
+    { tenantId: z.string().min(1), contentType: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), startTime: z.union([z.string(), z.null()]).optional(), endTime: z.union([z.string(), z.null()]).optional(), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, contentType, publisherIdentifier, startTime, endTime, userId }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.listNotifications({ tenantId, contentType, publisherIdentifier, startTime, endTime, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_activity_get_content",
+    toolText({
+      summary: "Retrieve an Office 365 Management Activity content blob by content URI.",
+      useWhen: "you already have a contentUri from available content or a notification and want the actual activity records",
+      doNotUseWhen: "you need to discover new content blobs; use list available content instead",
+      permissions: "a valid Office 365 Management Activity token",
+      environment: "GETs the exact contentUri and returns the JSON collection of records",
+      parameters: "contentUri (required string), tenantId (required string), userId (optional string)",
+      response: "ok/status/data with the content blob payload",
+      failures: "401/403 invalid token or missing ActivityFeed.Read, 400 invalid contentUri, 404 expired or missing content, 429/5xx upstream errors",
+      safety: "content blobs can contain sensitive audit data",
+      prerequisite: "office365_activity_list_available_content",
+      followUp: "office365_activity_api_request, office365_activity_list_notifications",
+      example: '{"name":"office365_activity_get_content","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","contentUri":"https://manage.office.com/api/v1.0/..."}}'
+    }),
+    { tenantId: z.string().min(1), contentUri: z.string().min(1), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, contentUri, userId }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.getContent({ tenantId, contentUri, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_activity_list_resource_friendly_names",
+    toolText({
+      summary: "Retrieve friendly names for Office 365 DLP sensitive types.",
+      useWhen: "you need to map DLP GUIDs to friendly names or localize the display names",
+      doNotUseWhen: "you need another resource type; the API currently supports DlpSensitiveType only",
+      permissions: "a valid Office 365 Management Activity token and DLP sensitive data access where required",
+      environment: "GETs /resources/dlpSensitiveTypes and optionally sends Accept-Language",
+      parameters: "tenantId (required string), publisherIdentifier (optional string), acceptLanguage (optional string), userId (optional string)",
+      response: "ok/status/data with id/name pairs",
+      failures: "401/403 invalid token, 400 invalid Accept-Language, 429/5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_activity_list_available_content",
+      followUp: "office365_activity_get_content, office365_activity_api_request",
+      example: '{"name":"office365_activity_list_resource_friendly_names","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","acceptLanguage":"en-US"}}'
+    }),
+    { tenantId: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), acceptLanguage: z.string().min(1).optional(), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, publisherIdentifier, acceptLanguage, userId }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.listResourceFriendlyNames({ tenantId, publisherIdentifier, acceptLanguage, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_activity_api_request",
+    toolText({
+      summary: "Run a generic Office 365 Management Activity API request.",
+      useWhen: "you need a supported endpoint that is not covered by a dedicated Office 365 activity tool",
+      doNotUseWhen: "a specialized Office 365 activity tool already models the operation more safely",
+      permissions: "a valid Office 365 Management Activity token; mutating methods also need MCP_ADMIN_AUTH_KEY when configured",
+      environment: "method is normalized to uppercase and path is resolved against the tenant-scoped activity feed root",
+      parameters: "method (required string), path (required string), query (optional object), body (optional JSON), headers (optional object), tenantId (required string), publisherIdentifier (optional string), userId (optional string), tokenId (optional string), authorizationKey (optional string for mutating calls)",
+      response: "ok/status/data plus request metadata and response headers",
+      failures: "400 invalid path, time window, or body; 401 missing or invalid token or admin key; 403 upstream permission failure; 404 not found; 429 throttling; 5xx upstream or transport failure",
+      safety: "treat POST, PUT, PATCH, and DELETE as destructive-capable operations",
+      prerequisite: "office365_activity_connection_info",
+      followUp: "office365_activity_get_content or another read tool for validation",
+      example: '{"name":"office365_activity_api_request","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","method":"GET","path":"/subscriptions/list"}}'
+    }),
+    { method: z.string().min(1), path: z.string().min(1), query: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(), body: z.any().optional(), headers: z.record(z.string(), z.string()).optional(), tenantId: z.string().min(1), publisherIdentifier: z.string().min(1).optional(), userId: z.string().min(1).optional(), tokenId: z.string().min(1).optional(), authorizationKey: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ method, path, query, body, headers, tenantId, publisherIdentifier, userId, tokenId, authorizationKey }) => {
+      const normalizedMethod = normalizeMethod(method);
+      if (MUTATING_METHODS.has(normalizedMethod)) {
+        assertAuthorized(adminAuthKey, authorizationKey);
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        data: await office365Client.apiRequest({ method: normalizedMethod, path, query, body, headers, tenantId, publisherIdentifier, userId, tokenId, authorizationKey })
+      };
+    })
   );
 
   server.tool(

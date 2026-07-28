@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { env } from "./config/env.js";
 import { ConfigStore } from "./services/configStore.js";
 import { GraphServiceClient, GraphTokenStore } from "./services/graph.js";
+import { Office365ManagementActivityClient } from "./services/o365.js";
 import { VaultService } from "./services/vault.js";
 import { createMcpServer } from "./mcp/server.js";
 
@@ -39,10 +40,21 @@ async function main() {
     allowSensitiveOutput: env.allowSensitiveOutput
   });
 
+  const office365Client = new Office365ManagementActivityClient({
+    baseUrl: env.office365.baseUrl,
+    defaultTenantId: env.office365.defaultTenantId,
+    defaultPublisherIdentifier: env.office365.defaultPublisherIdentifier,
+    tokenStore,
+    configStore,
+    defaultUserId: env.defaultUserId,
+    allowSensitiveOutput: env.allowSensitiveOutput
+  });
+
   const server = createMcpServer({
     name: env.mcpServerName,
     version: env.mcpServerVersion,
     graphClient,
+    office365Client,
     appName: env.appName,
     defaultUserId: env.defaultUserId,
     adminAuthKey: env.adminAuthKey,

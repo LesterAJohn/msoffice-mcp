@@ -89,6 +89,12 @@ export const env = {
     defaultScope: String(process.env.GRAPH_DEFAULT_SCOPE ?? "default").trim() || "default",
     defaultUserId: String(process.env.GRAPH_DEFAULT_USER_ID ?? "default").trim() || "default"
   },
+  office365: {
+    baseUrl: required("O365_API_BASE_URL", "https://manage.office.com/api/v1.0"),
+    defaultTenantId: String(process.env.O365_DEFAULT_TENANT_ID ?? "").trim(),
+    defaultPublisherIdentifier: String(process.env.O365_DEFAULT_PUBLISHER_IDENTIFIER ?? "").trim(),
+    defaultContentType: String(process.env.O365_DEFAULT_CONTENT_TYPE ?? "Audit.General").trim() || "Audit.General"
+  },
   transport: {
     mode: transportMode,
     http: {

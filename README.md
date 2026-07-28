@@ -1,6 +1,6 @@
 # msoffice-mcp
 
-Microsoft Graph MCP server built on the same operational skeleton as [skeleton-mcp](https://github.com/LesterAJohn/skeleton-mcp), but specialized for Microsoft Graph.
+Microsoft Graph and Office 365 Management Activity MCP server built on the same operational skeleton as [skeleton-mcp](https://github.com/LesterAJohn/skeleton-mcp), but specialized for Microsoft Graph and Office 365 audit/activity retrieval.
 
 This repository keeps the skeleton’s core guarantees:
 
@@ -12,9 +12,9 @@ This repository keeps the skeleton’s core guarantees:
 
 ## What This Server Does
 
-The server exposes a generic Microsoft Graph request tool plus dedicated shortcuts for common Graph families such as users, groups, mail, calendar, drives, sites, devices, applications, and security alerts.
+The server exposes the official Microsoft Graph MCP discovery/read tools plus dedicated shortcuts for common Graph families. It also exposes the Office 365 Management Activity API operations for subscriptions, content, notifications, and DLP-friendly-name lookup.
 
-The generic request tool provides full Graph coverage because any Graph REST path can be called directly. The dedicated tools exist for higher-signal prompts, safer defaults, and clearer LLM guidance.
+The generic request tools provide full coverage because any documented REST path can be called directly. The dedicated tools exist for higher-signal prompts, safer defaults, and clearer LLM guidance.
 
 User access tokens are stored per user in Vault with default-user fallback. Non-secret runtime configuration is stored per user in Postgres.
 
@@ -156,6 +156,10 @@ Core:
 - `GRAPH_API_BETA_BASE_URL`
 - `GRAPH_DEFAULT_SCOPE`
 - `GRAPH_DEFAULT_USER_ID`
+- `O365_API_BASE_URL`
+- `O365_DEFAULT_TENANT_ID`
+- `O365_DEFAULT_PUBLISHER_IDENTIFIER`
+- `O365_DEFAULT_CONTENT_TYPE`
 
 Postgres:
 
@@ -213,6 +217,26 @@ If you already manage Postgres and Vault elsewhere, use the external compose fil
 - `npm run start:stdio` starts the MCP server over stdio.
 - `npm run start:http` starts the HTTP MCP endpoint.
 - `npm run start:both` starts both transports as separate child processes.
+
+## Office 365 Management Activity API
+
+The Office 365 surface is tenant-scoped and uses the tenant ID in the root URL. The server supports the documented activity feed operations:
+
+- `office365_activity_connection_info`
+- `office365_activity_scope_info`
+- `office365_activity_list_content_types`
+- `office365_activity_list_subscriptions`
+- `office365_activity_start_subscription`
+- `office365_activity_stop_subscription`
+- `office365_activity_list_available_content`
+- `office365_activity_list_notifications`
+- `office365_activity_get_content`
+- `office365_activity_list_resource_friendly_names`
+- `office365_activity_api_request`
+
+Use `office365_activity_start_subscription` to begin collecting content for a tenant/content type. Use `office365_activity_list_available_content` to discover content blobs, `office365_activity_get_content` to retrieve the blob payload, and `office365_activity_list_notifications` to inspect webhook attempts.
+
+The request tools enforce the documented time-window constraints for content and notification listing, and mutating subscription tools require `MCP_ADMIN_AUTH_KEY` when configured.
 
 ## Tests
 
