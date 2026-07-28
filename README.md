@@ -1,6 +1,6 @@
 # msoffice-mcp
 
-Microsoft Graph and Office 365 Management Activity MCP server built on the same operational skeleton as [skeleton-mcp](https://github.com/LesterAJohn/skeleton-mcp), but specialized for Microsoft Graph and Office 365 audit/activity retrieval.
+Microsoft Graph and Office 365 MCP server built on the same operational skeleton as [skeleton-mcp](https://github.com/LesterAJohn/skeleton-mcp), specialized for Microsoft Graph, Microsoft 365 Copilot APIs, and Office 365 audit and service communications retrieval.
 
 This repository keeps the skeleton’s core guarantees:
 
@@ -12,7 +12,7 @@ This repository keeps the skeleton’s core guarantees:
 
 ## What This Server Does
 
-The server exposes the official Microsoft Graph MCP discovery/read tools plus dedicated shortcuts for common Graph families. It also exposes the Office 365 Management Activity API operations for subscriptions, content, notifications, and DLP-friendly-name lookup.
+The server exposes the official Microsoft Graph MCP discovery/read tools plus dedicated shortcuts for common Graph families. It also exposes dedicated Microsoft 365 Copilot API tools for retrieval, search, chat, interaction export, meeting insights, change notification subscriptions, usage reports, and package management. For Office 365, it supports Management Activity operations for subscriptions, content, notifications, and DLP-friendly-name lookup, along with the legacy Service Communications read surface for services, current status, historical status, and messages.
 
 The generic request tools provide full coverage because any documented REST path can be called directly. The dedicated tools exist for higher-signal prompts, safer defaults, and clearer LLM guidance.
 
@@ -123,6 +123,91 @@ Example:
 The dedicated read tools are `graph_me`, `graph_users_query`, `graph_groups_query`, `graph_mail_messages`, `graph_calendar_events`, `graph_drive_children`, `graph_security_alerts`, `graph_applications_query`, `graph_sites_query`, and `graph_devices_query`.
 
 Use them when the intent is obvious and you want a narrower contract than the generic request tool. Each supports `userId` and `tokenId` selection where appropriate, plus common query fields like `top`, `select`, `filter`, `orderby`, `expand`, `search`, and `count`.
+
+## Microsoft 365 Copilot APIs
+
+The Copilot surface is exposed under dedicated tools that map to documented Microsoft Graph Copilot endpoints.
+
+Copilot discovery and retrieval tools:
+
+- `copilot_api_capabilities`
+- `copilot_retrieval_query`
+- `copilot_search_query`
+
+Copilot chat tools (preview endpoints on Graph beta by default):
+
+- `copilot_chat_create_conversation`
+- `copilot_chat_send_message`
+- `copilot_chat_send_message_stream`
+
+Copilot interaction and meeting insights tools:
+
+- `copilot_interactions_list`
+- `copilot_meeting_insights_list`
+- `copilot_meeting_insight_get`
+
+Copilot change notifications and reports:
+
+- `copilot_change_notifications_create_subscription`
+- `copilot_usage_report_user_count_summary`
+- `copilot_usage_report_user_count_trend`
+- `copilot_usage_report_user_detail`
+
+Copilot package management tools:
+
+- `copilot_packages_list`
+- `copilot_package_get`
+- `copilot_package_update`
+- `copilot_package_block`
+- `copilot_package_unblock`
+- `copilot_package_reassign`
+
+Mutation tools (`copilot_change_notifications_create_subscription`, `copilot_package_update`, `copilot_package_block`, `copilot_package_unblock`, and `copilot_package_reassign`) require `MCP_ADMIN_AUTH_KEY` when configured.
+
+Most Copilot APIs require Microsoft 365 Copilot licenses and specific Graph permissions. Several endpoints are preview-only under `/beta`; those tools default to beta unless overridden with `useBetaBaseUrl`.
+
+### Copilot API Version Matrix
+
+| Tool | Endpoint Family | Default Graph Version Behavior | Override |
+| --- | --- | --- | --- |
+| `copilot_api_capabilities` | local capability map | local metadata only (no Graph call) | not applicable |
+| `copilot_retrieval_query` | `/copilot/retrieval` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_search_query` | `/copilot/search` | defaults to beta (`useBetaBaseUrl=true`) | set `useBetaBaseUrl=false` |
+| `copilot_chat_create_conversation` | `/copilot/conversations` | defaults to beta (`useBetaBaseUrl=true`) | set `useBetaBaseUrl=false` |
+| `copilot_chat_send_message` | `/copilot/conversations/{id}/chat` | defaults to beta (`useBetaBaseUrl=true`) | set `useBetaBaseUrl=false` |
+| `copilot_chat_send_message_stream` | `/copilot/conversations/{id}/chatOverStream` | defaults to beta (`useBetaBaseUrl=true`) | set `useBetaBaseUrl=false` |
+| `copilot_interactions_list` | `/copilot/users/{id}/interactionHistory/getAllEnterpriseInteractions` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_meeting_insights_list` | `/copilot/users/{id}/onlineMeetings/{id}/aiInsights` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_meeting_insight_get` | `/copilot/users/{id}/onlineMeetings/{id}/aiInsights/{id}` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_change_notifications_create_subscription` | `/subscriptions` with Copilot resource | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_usage_report_user_count_summary` | `/copilot/reports/getMicrosoft365CopilotUserCountSummary(...)` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_usage_report_user_count_trend` | `/copilot/reports/getMicrosoft365CopilotUserCountTrend(...)` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_usage_report_user_detail` | `/copilot/reports/getMicrosoft365CopilotUsageUserDetail(...)` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_packages_list` | `/copilot/admin/catalog/packages` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_package_get` | `/copilot/admin/catalog/packages/{id}` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_package_update` | `/copilot/admin/catalog/packages/{id}` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_package_block` | `/copilot/admin/catalog/packages/{id}/block` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_package_unblock` | `/copilot/admin/catalog/packages/{id}/unblock` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+| `copilot_package_reassign` | `/copilot/admin/catalog/packages/{id}/reassign` | defaults to v1.0 (`useBetaBaseUrl=false`) | set `useBetaBaseUrl=true` |
+
+### Copilot Live Integration Profile
+
+Use `npm run test:integration:copilot` for a live tenant check against a read-only Copilot endpoint (`copilot_usage_report_user_count_summary`).
+
+The integration test is opt-in and env-gated. It is skipped unless `COPILOT_INTEGRATION_RUN=true` and a token is provided.
+
+Required for live execution:
+
+- `COPILOT_INTEGRATION_RUN=true`
+- `COPILOT_INTEGRATION_ACCESS_TOKEN=<delegated or app token with Copilot report permissions>`
+
+Optional tuning:
+
+- `COPILOT_INTEGRATION_PERIOD` (`D7`, `D28`, `D30`, `D90`, `D180`, or `ALL`)
+- `COPILOT_INTEGRATION_REPORT_VERSION` (`v1` or `v2`)
+- `COPILOT_INTEGRATION_USE_BETA` (`true` or `false`)
+- `COPILOT_INTEGRATION_GRAPH_BASE_URL`
+- `COPILOT_INTEGRATION_GRAPH_BETA_BASE_URL`
 
 ### graph_config_list, graph_config_get, graph_config_set, graph_config_delete
 
@@ -238,6 +323,22 @@ Use `office365_activity_start_subscription` to begin collecting content for a te
 
 The request tools enforce the documented time-window constraints for content and notification listing, and mutating subscription tools require `MCP_ADMIN_AUTH_KEY` when configured.
 
+## Office 365 Service Communications API
+
+The Service Communications surface is tenant-scoped and uses the same configured Office 365 base URL with a `/ServiceComms` root. The server supports the documented read operations:
+
+- `office365_service_comms_connection_info`
+- `office365_service_comms_scope_info`
+- `office365_service_comms_list_services`
+- `office365_service_comms_get_current_status`
+- `office365_service_comms_get_historical_status`
+- `office365_service_comms_get_messages`
+- `office365_service_comms_api_request`
+
+Use `office365_service_comms_list_services` to discover subscribed services, `office365_service_comms_get_current_status` for the latest workload status, `office365_service_comms_get_historical_status` for the historical timeline, and `office365_service_comms_get_messages` for incident and message feed entries.
+
+Microsoft has retired this legacy API in favor of Microsoft Graph service health and communications, but the MCP keeps these documented endpoints available for compatibility and parity with the reference surface.
+
 ## Tests
 
 Test coverage includes:
@@ -246,6 +347,9 @@ Test coverage includes:
 - Graph request construction and authorization headers.
 - MCP tool authorization for mutation tools.
 - Generic Graph request normalization.
+- Dedicated Microsoft 365 Copilot tool routing and admin-protected mutations.
+- Office 365 Management Activity request construction and tenant scoping.
+- Office 365 Service Communications request construction and tool exposure.
 
 ## Registering The Server
 

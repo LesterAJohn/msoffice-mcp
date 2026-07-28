@@ -183,6 +183,59 @@ export class Office365ManagementActivityClient {
     };
   }
 
+  async requestServiceComms({ method, path, query = {}, body, headers = {}, tenantId, userId, tokenId }) {
+    const scope = this.scope({ tenantId, userId });
+    if (!scope.tenantId) {
+      const error = new Error("tenantId is required");
+      error.status = 400;
+      throw error;
+    }
+
+    const token = await this.tokenStore.resolveActiveToken({ userId: scope.userId, tokenId });
+    if (!token?.secret?.accessToken) {
+      const error = new Error(`No active Office 365 token found for user ${scope.userId}`);
+      error.status = 401;
+      throw error;
+    }
+
+    const requestPath = normalizePath(path);
+    const baseRoot = `${this.baseUrl}/${scope.tenantId}/ServiceComms/`;
+    const resolvedPath = /^https?:\/\//i.test(requestPath) ? requestPath : requestPath.replace(/^\/+/, "");
+    const url = new URL(resolvedPath + buildQueryString(query), baseRoot);
+    const requestHeaders = new Headers({
+      Authorization: `Bearer ${token.secret.accessToken}`,
+      Accept: "application/json",
+      ...headers
+    });
+
+    const init = { method: String(method ?? "GET").trim().toUpperCase(), headers: requestHeaders };
+    if (body !== undefined && body !== null && !["GET", "HEAD"].includes(init.method)) {
+      if (typeof body === "string") {
+        init.body = body;
+      } else {
+        requestHeaders.set("Content-Type", "application/json");
+        init.body = JSON.stringify(body);
+      }
+    }
+
+    const response = await this.fetch(url, init);
+    const contentType = response.headers.get("content-type") ?? "";
+    const responseText = await response.text();
+    const parsed = contentType.includes("application/json") && responseText ? JSON.parse(responseText) : responseText;
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      headers: Object.fromEntries(response.headers.entries()),
+      data: parsed,
+      meta: {
+        tenantId: scope.tenantId,
+        userId: scope.userId,
+        path: normalizePath(path)
+      }
+    };
+  }
+
   async listSubscriptions({ tenantId, publisherIdentifier, userId } = {}) {
     const scope = this.scope({ tenantId, publisherIdentifier, userId });
     return await this.request({ method: "GET", path: "/subscriptions/list", query: { PublisherIdentifier: scope.publisherIdentifier }, tenantId: scope.tenantId, userId: scope.userId });
@@ -264,5 +317,67 @@ export class Office365ManagementActivityClient {
       // authorization is enforced by the caller when admin auth is configured
     }
     return await this.request({ method, path, query, body, headers, tenantId, publisherIdentifier, userId, tokenId });
+  }
+
+  async listServices({ tenantId, userId, select } = {}) {
+    const query = {};
+    if (select) {
+      query.$select = select;
+    }
+    return await this.requestServiceComms({ method: "GET", path: "/Services", query, tenantId, userId });
+  }
+
+  async getCurrentStatus({ tenantId, userId, workload, select } = {}) {
+    const query = {};
+    if (workload) {
+      query.Workload = workload;
+    }
+    if (select) {
+      query.$select = select;
+    }
+    return await this.requestServiceComms({ method: "GET", path: "/CurrentStatus", query, tenantId, userId });
+  }
+
+  async getHistoricalStatus({ tenantId, userId, workload, statusTime, select } = {}) {
+    const query = {};
+    if (workload) {
+      query.Workload = workload;
+    }
+    if (statusTime) {
+      query.StatusTime = String(statusTime);
+    }
+    if (select) {
+      query.$select = select;
+    }
+    return await this.requestServiceComms({ method: "GET", path: "/HistoricalStatus", query, tenantId, userId });
+  }
+
+  async getMessages({ tenantId, userId, workload, startTime, endTime, messageType, id, top, skip, select } = {}) {
+    const query = {};
+    if (workload) {
+      query.Workload = workload;
+    }
+    if (startTime) {
+      query.StartTime = String(startTime);
+    }
+    if (endTime) {
+      query.EndTime = String(endTime);
+    }
+    if (messageType) {
+      query.MessageType = messageType;
+    }
+    if (id) {
+      query.Id = id;
+    }
+    if (top !== undefined && top !== null && top !== "") {
+      query.$top = top;
+    }
+    if (skip !== undefined && skip !== null && skip !== "") {
+      query.$skip = skip;
+    }
+    if (select) {
+      query.$select = select;
+    }
+    return await this.requestServiceComms({ method: "GET", path: "/Messages", query, tenantId, userId });
   }
 }

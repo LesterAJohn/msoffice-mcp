@@ -69,6 +69,21 @@ function createOffice365ClientMock() {
     },
     async apiRequest(payload) {
       return { status: 200, echoed: payload };
+    },
+    async listServices() {
+      return { status: 200, data: [{ workload: "Exchange" }] };
+    },
+    async getCurrentStatus() {
+      return { status: 200, data: [{ workload: "Exchange", status: "ServiceDegradation" }] };
+    },
+    async getHistoricalStatus() {
+      return { status: 200, data: [{ workload: "Exchange", statusTime: "2024-01-01T00:00:00Z" }] };
+    },
+    async getMessages() {
+      return { status: 200, data: [{ id: "msg-1", messageType: "Incident" }] };
+    },
+    async requestServiceComms(payload) {
+      return { status: 200, echoed: payload };
     }
   };
 }
@@ -100,6 +115,10 @@ test("official Office 365 management tools are exposed", async () => {
     assert.equal(connection.payload.ok, true);
     assert.equal(connection.payload.data.office365.api, "office-365-management-activity");
 
+    const serviceConnection = await invokeTool(server, "office365_service_comms_connection_info");
+    assert.equal(serviceConnection.payload.ok, true);
+    assert.equal(serviceConnection.payload.data.serviceComms.api, "office-365-service-communications");
+
     const contentTypes = await invokeTool(server, "office365_activity_list_content_types");
     assert.equal(contentTypes.payload.ok, true);
     assert.ok(contentTypes.payload.data.contentTypes.includes("Audit.SharePoint"));
@@ -123,6 +142,22 @@ test("official Office 365 management tools are exposed", async () => {
     const generic = await invokeTool(server, "office365_activity_api_request", { tenantId: "22222222-2222-2222-2222-222222222222", method: "GET", path: "/subscriptions/list" });
     assert.equal(generic.payload.ok, true);
     assert.equal(generic.payload.data.echoed.method, "GET");
+
+    const serviceList = await invokeTool(server, "office365_service_comms_list_services", { tenantId: "22222222-2222-2222-2222-222222222222" });
+    assert.equal(serviceList.payload.ok, true);
+
+    const currentStatus = await invokeTool(server, "office365_service_comms_get_current_status", { tenantId: "22222222-2222-2222-2222-222222222222", workload: "Exchange" });
+    assert.equal(currentStatus.payload.ok, true);
+
+    const historicalStatus = await invokeTool(server, "office365_service_comms_get_historical_status", { tenantId: "22222222-2222-2222-2222-222222222222", workload: "Exchange" });
+    assert.equal(historicalStatus.payload.ok, true);
+
+    const messages = await invokeTool(server, "office365_service_comms_get_messages", { tenantId: "22222222-2222-2222-2222-222222222222", workload: "Exchange", top: 10 });
+    assert.equal(messages.payload.ok, true);
+
+    const serviceGeneric = await invokeTool(server, "office365_service_comms_api_request", { tenantId: "22222222-2222-2222-2222-222222222222", method: "GET", path: "/Messages" });
+    assert.equal(serviceGeneric.payload.ok, true);
+    assert.equal(serviceGeneric.payload.data.echoed.method, "GET");
   } finally {
     restoreEnv();
   }

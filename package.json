@@ -12,7 +12,8 @@
     "start:stdio": "node src/index.js",
     "start:http": "node src/http/index.js",
     "start:both": "node src/start-both.js",
-    "test": "node --test tests/**/*.test.js"
+    "test": "node --test tests/**/*.test.js",
+    "test:integration:copilot": "node --test tests/integration/copilot-live.integration.js"
   },
   "engines": {
     "node": ">=20"

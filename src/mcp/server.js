@@ -221,9 +221,9 @@ export function createMcpServer({ name, version, graphClient, office365Client, a
       useWhen: "you need candidate Graph API calls before choosing a request path",
       doNotUseWhen: "you already know the exact endpoint and want to execute it directly",
       permissions: "none",
-      environment: "reads from the built-in query example catalog and returns ranked suggestions",
+      environment: "reads from the built-in query example catalog (including Copilot-focused patterns) and returns ranked suggestions",
       parameters: "prompt (required string)",
-      response: "ok/status/data.prompt/data.suggestions with method, path, query, entity, and confidence",
+      response: "ok/status/data.prompt/data.suggestions with method, path, query, entity, mcpTool, and confidence",
       failures: "500 if suggestion ranking fails",
       safety: "",
       prerequisite: "graph_connection_info",
@@ -245,9 +245,9 @@ export function createMcpServer({ name, version, graphClient, office365Client, a
       useWhen: "you need schema guidance before constructing a Graph request",
       doNotUseWhen: "you only need a specific record; use microsoft_graph_get or a dedicated read tool instead",
       permissions: "none",
-      environment: "returns a curated schema for common Graph identity and directory entities",
+      environment: "returns a curated schema for common Graph identity/directory entities plus Copilot entities",
       parameters: "entity (required string)",
-      response: "ok/status/data.entity/data.properties/data.relationships",
+      response: "ok/status/data.entity/data.properties/data.relationships/data.recommendedTools",
       failures: "500 if schema lookup fails",
       safety: "",
       prerequisite: "graph_connection_info",
@@ -297,6 +297,784 @@ export function createMcpServer({ name, version, graphClient, office365Client, a
         useBetaBaseUrl
       })
     }))
+  );
+
+  function buildCopilotReportPath(functionName, period, version) {
+    const normalizedPeriod = String(period ?? "").trim();
+    if (!normalizedPeriod) {
+      const error = new Error("period is required");
+      error.status = 400;
+      throw error;
+    }
+
+    const versionClause = version ? `, version='${String(version).trim()}'` : "";
+    return `/copilot/reports/${functionName}(period='${normalizedPeriod}'${versionClause})`;
+  }
+
+  server.tool(
+    "copilot_api_capabilities",
+    toolText({
+      summary: "List Microsoft 365 Copilot API families and their mapped Microsoft Graph paths.",
+      useWhen: "you need a concise discovery map of the dedicated Copilot tools available in this MCP",
+      doNotUseWhen: "you already know the target API operation and want to execute it",
+      permissions: "none",
+      environment: "static capability map for Copilot API coverage in this build",
+      parameters: "none",
+      response: "ok/status/data.capabilities",
+      failures: "500 if capability map assembly fails",
+      safety: "",
+      prerequisite: "graph_connection_info",
+      followUp: "copilot_retrieval_query, copilot_search_query, copilot_chat_create_conversation",
+      example: '{"name":"copilot_api_capabilities","arguments":{}}'
+    }),
+    {},
+    withErrorHandling(allowSensitiveOutput, async () => ({
+      ok: true,
+      status: 200,
+      data: {
+        capabilities: [
+          { family: "retrieval", path: "/copilot/retrieval", methods: ["POST"], supportsV1: true, supportsBeta: true },
+          { family: "search", path: "/copilot/search", methods: ["POST"], supportsV1: false, supportsBeta: true },
+          { family: "chat", path: "/copilot/conversations", methods: ["POST"], supportsV1: false, supportsBeta: true },
+          { family: "interaction-export", path: "/copilot/users/{id}/interactionHistory/getAllEnterpriseInteractions", methods: ["GET"], supportsV1: true, supportsBeta: true },
+          { family: "meeting-insights", path: "/copilot/users/{userId}/onlineMeetings/{onlineMeetingId}/aiInsights", methods: ["GET"], supportsV1: true, supportsBeta: true },
+          { family: "ai-change-notifications", path: "/subscriptions with /copilot/* resource", methods: ["POST"], supportsV1: true, supportsBeta: true },
+          { family: "usage-reports", path: "/copilot/reports/getMicrosoft365Copilot*", methods: ["GET"], supportsV1: true, supportsBeta: true },
+          { family: "package-management", path: "/copilot/admin/catalog/packages", methods: ["GET", "PATCH", "POST"], supportsV1: true, supportsBeta: true }
+        ]
+      }
+    }))
+  );
+
+  server.tool(
+    "copilot_retrieval_query",
+    toolText({
+      summary: "Call the Microsoft 365 Copilot Retrieval API.",
+      useWhen: "you need grounding extracts from SharePoint, OneDrive for Business, or Copilot connectors",
+      doNotUseWhen: "you need hybrid ranking for OneDrive-only search; use copilot_search_query instead",
+      permissions: "delegated permissions for the chosen source, such as Files.Read.All and Sites.Read.All (and ExternalItem.Read.All for connectors)",
+      environment: "POSTs /copilot/retrieval on v1.0 by default, with optional beta",
+      parameters: "queryString (required string), dataSource (required enum), filterExpression (optional string), resourceMetadata (optional string array), maximumNumberOfResults (optional 1-25), dataSourceConfiguration (optional object), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with retrievalHits",
+      failures: "400 invalid body fields, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "retrieved data may include sensitive business content",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_chat_send_message or graph_api_request",
+      example: '{"name":"copilot_retrieval_query","arguments":{"queryString":"How to setup corporate VPN?","dataSource":"sharePoint"}}'
+    }),
+    {
+      queryString: z.string().min(1).max(1500),
+      dataSource: z.enum(["sharePoint", "oneDriveBusiness", "externalItem"]),
+      filterExpression: z.string().min(1).optional(),
+      resourceMetadata: z.array(z.string().min(1)).optional(),
+      maximumNumberOfResults: z.number().int().min(1).max(25).optional(),
+      dataSourceConfiguration: z.any().optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ queryString, dataSource, filterExpression, resourceMetadata, maximumNumberOfResults, dataSourceConfiguration, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "POST",
+        path: "/copilot/retrieval",
+        body: {
+          queryString,
+          dataSource,
+          filterExpression,
+          resourceMetadata,
+          maximumNumberOfResults,
+          dataSourceConfiguration
+        },
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_search_query",
+    toolText({
+      summary: "Call the Microsoft 365 Copilot Search API (preview).",
+      useWhen: "you need hybrid search over OneDrive for work or school content",
+      doNotUseWhen: "you need retrieval extracts from SharePoint or external connectors; use copilot_retrieval_query instead",
+      permissions: "delegated Files.Read.All and Sites.Read.All (or higher delegated equivalents)",
+      environment: "POSTs /copilot/search on beta by default",
+      parameters: "query (required string), pageSize (optional 1-100), dataSources (optional object), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with searchHits and totalCount",
+      failures: "400 invalid body fields, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "search results can expose sensitive file metadata and previews",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_chat_send_message or graph_api_request",
+      example: '{"name":"copilot_search_query","arguments":{"query":"quarterly budget analysis","pageSize":10}}'
+    }),
+    {
+      query: z.string().min(1).max(1500),
+      pageSize: z.number().int().min(1).max(100).optional(),
+      dataSources: z.any().optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ query, pageSize, dataSources, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "POST",
+        path: "/copilot/search",
+        body: { query, pageSize, dataSources },
+        userId,
+        tokenId,
+        useBetaBaseUrl: useBetaBaseUrl ?? true
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_chat_create_conversation",
+    toolText({
+      summary: "Create a Microsoft 365 Copilot Chat conversation (preview).",
+      useWhen: "you need a new conversation ID before sending synchronous or streamed chat turns",
+      doNotUseWhen: "you already have a conversation ID and want to continue it",
+      permissions: "delegated Chat API permissions required by Microsoft 365 Copilot",
+      environment: "POSTs /copilot/conversations on beta by default",
+      parameters: "userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with conversation metadata including id",
+      failures: "401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_chat_send_message, copilot_chat_send_message_stream",
+      example: '{"name":"copilot_chat_create_conversation","arguments":{}}'
+    }),
+    {
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "POST",
+        path: "/copilot/conversations",
+        body: {},
+        userId,
+        tokenId,
+        useBetaBaseUrl: useBetaBaseUrl ?? true
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_chat_send_message",
+    toolText({
+      summary: "Send a synchronous Chat API turn to an existing Copilot conversation (preview).",
+      useWhen: "you need a full Chat API response in one payload",
+      doNotUseWhen: "you need server-sent event streaming; use copilot_chat_send_message_stream instead",
+      permissions: "delegated Chat API permissions required by Microsoft 365 Copilot",
+      environment: "POSTs /copilot/conversations/{conversationId}/chat on beta by default",
+      parameters: "conversationId (required string), messageText (required string), locationHint (required object), additionalContext (optional array), contextualResources (optional object), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with a copilotConversation payload",
+      failures: "400 invalid body fields, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "responses are AI-generated and should be validated before operational use",
+      prerequisite: "copilot_chat_create_conversation",
+      followUp: "copilot_chat_send_message_stream, copilot_retrieval_query",
+      example: '{"name":"copilot_chat_send_message","arguments":{"conversationId":"<id>","messageText":"What meeting do I have at 9 AM tomorrow morning?","locationHint":{"timeZone":"America/New_York"}}}'
+    }),
+    {
+      conversationId: z.string().min(1),
+      messageText: z.string().min(1),
+      locationHint: z.record(z.any()),
+      additionalContext: z.array(z.record(z.any())).optional(),
+      contextualResources: z.record(z.any()).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ conversationId, messageText, locationHint, additionalContext, contextualResources, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "POST",
+        path: `/copilot/conversations/${encodeURIComponent(conversationId)}/chat`,
+        body: {
+          message: { text: messageText },
+          locationHint,
+          additionalContext,
+          contextualResources
+        },
+        userId,
+        tokenId,
+        useBetaBaseUrl: useBetaBaseUrl ?? true
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_chat_send_message_stream",
+    toolText({
+      summary: "Send a streamed Chat API turn to an existing Copilot conversation (preview).",
+      useWhen: "you need incremental server-sent event output from the Chat API",
+      doNotUseWhen: "you need a single non-stream payload; use copilot_chat_send_message instead",
+      permissions: "delegated Chat API permissions required by Microsoft 365 Copilot",
+      environment: "POSTs /copilot/conversations/{conversationId}/chatOverStream on beta by default",
+      parameters: "conversationId (required string), messageText (required string), locationHint (required object), additionalContext (optional array), contextualResources (optional object), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with the upstream response content",
+      failures: "400 invalid body fields, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "responses are AI-generated and should be validated before operational use",
+      prerequisite: "copilot_chat_create_conversation",
+      followUp: "copilot_chat_send_message, copilot_retrieval_query",
+      example: '{"name":"copilot_chat_send_message_stream","arguments":{"conversationId":"<id>","messageText":"Summarize this document for me.","locationHint":{"timeZone":"America/New_York"}}}'
+    }),
+    {
+      conversationId: z.string().min(1),
+      messageText: z.string().min(1),
+      locationHint: z.record(z.any()),
+      additionalContext: z.array(z.record(z.any())).optional(),
+      contextualResources: z.record(z.any()).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ conversationId, messageText, locationHint, additionalContext, contextualResources, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "POST",
+        path: `/copilot/conversations/${encodeURIComponent(conversationId)}/chatOverStream`,
+        body: {
+          message: { text: messageText },
+          locationHint,
+          additionalContext,
+          contextualResources
+        },
+        userId,
+        tokenId,
+        useBetaBaseUrl: useBetaBaseUrl ?? true
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_interactions_list",
+    toolText({
+      summary: "List Microsoft 365 Copilot interactions for a specific user.",
+      useWhen: "you need interaction export data for user prompts and Copilot responses",
+      doNotUseWhen: "you need change notifications instead of pull-based listing",
+      permissions: "application AiEnterpriseInteraction.Read.All",
+      environment: "GETs /copilot/users/{id}/interactionHistory/getAllEnterpriseInteractions",
+      parameters: "interactionUserId (required string), top (optional number/string), filter (optional string), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data.value with aiInteraction items",
+      failures: "401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "interaction payloads can contain sensitive user prompts and generated content",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_change_notifications_create_subscription, graph_api_request",
+      example: '{"name":"copilot_interactions_list","arguments":{"interactionUserId":"<user-id>","top":100}}'
+    }),
+    {
+      interactionUserId: z.string().min(1),
+      top: z.union([z.string(), z.number()]).optional(),
+      filter: z.string().min(1).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ interactionUserId, top, filter, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: `/copilot/users/${encodeURIComponent(interactionUserId)}/interactionHistory/getAllEnterpriseInteractions`,
+        query: normalizeQuery({ $top: top, $filter: filter }),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_meeting_insights_list",
+    toolText({
+      summary: "List AI insights for a Teams online meeting in the Copilot namespace.",
+      useWhen: "you need all AI insight objects for a meeting before fetching a specific detail",
+      doNotUseWhen: "you already know the insight ID and need the detailed object",
+      permissions: "OnlineMeetingAiInsight.Read.All delegated or application permission",
+      environment: "GETs /copilot/users/{userId}/onlineMeetings/{onlineMeetingId}/aiInsights",
+      parameters: "meetingUserId (required string), onlineMeetingId (required string), select (optional string), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data.value with callAiInsight summaries",
+      failures: "401/403 token or permission failures, 404 expired or missing meeting, 429 throttling, 5xx upstream errors",
+      safety: "meeting insights can contain sensitive notes and action items",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_meeting_insight_get, graph_api_request",
+      example: '{"name":"copilot_meeting_insights_list","arguments":{"meetingUserId":"<user-id>","onlineMeetingId":"<meeting-id>"}}'
+    }),
+    {
+      meetingUserId: z.string().min(1),
+      onlineMeetingId: z.string().min(1),
+      select: z.string().min(1).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ meetingUserId, onlineMeetingId, select, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: `/copilot/users/${encodeURIComponent(meetingUserId)}/onlineMeetings/${encodeURIComponent(onlineMeetingId)}/aiInsights`,
+        query: normalizeQuery({ $select: select }),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_meeting_insight_get",
+    toolText({
+      summary: "Get a specific AI insight object for a Teams online meeting.",
+      useWhen: "you need full meeting notes, action items, and mention events for a specific insight",
+      doNotUseWhen: "you need the insight list first; call copilot_meeting_insights_list",
+      permissions: "OnlineMeetingAiInsight.Read.All delegated or application permission",
+      environment: "GETs /copilot/users/{userId}/onlineMeetings/{onlineMeetingId}/aiInsights/{aiInsightId}",
+      parameters: "meetingUserId (required string), onlineMeetingId (required string), aiInsightId (required string), select (optional string), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with a callAiInsight object",
+      failures: "401/403 token or permission failures, 404 insight not found or meeting expired, 429 throttling, 5xx upstream errors",
+      safety: "meeting insights can contain sensitive notes and participant mentions",
+      prerequisite: "copilot_meeting_insights_list",
+      followUp: "copilot_change_notifications_create_subscription, graph_api_request",
+      example: '{"name":"copilot_meeting_insight_get","arguments":{"meetingUserId":"<user-id>","onlineMeetingId":"<meeting-id>","aiInsightId":"<insight-id>"}}'
+    }),
+    {
+      meetingUserId: z.string().min(1),
+      onlineMeetingId: z.string().min(1),
+      aiInsightId: z.string().min(1),
+      select: z.string().min(1).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ meetingUserId, onlineMeetingId, aiInsightId, select, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: `/copilot/users/${encodeURIComponent(meetingUserId)}/onlineMeetings/${encodeURIComponent(onlineMeetingId)}/aiInsights/${encodeURIComponent(aiInsightId)}`,
+        query: normalizeQuery({ $select: select }),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_change_notifications_create_subscription",
+    toolText({
+      summary: "Create a Microsoft Graph subscription for Copilot AI interactions or AI insights change notifications.",
+      useWhen: "you need push-based change notifications for Copilot interactions or meeting AI insights",
+      doNotUseWhen: "you only need one-time data retrieval; use list/get tools instead",
+      permissions: "permissions required by the selected Copilot notification resource and Graph subscriptions API",
+      environment: "POSTs /subscriptions and forwards the subscription payload",
+      parameters: "changeType (required string), notificationUrl (required string), resource (required string), includeResourceData (optional boolean), encryptionCertificate (optional string), encryptionCertificateId (optional string), expirationDateTime (required string), clientState (optional string), lifecycleNotificationUrl (optional string), userId/tokenId/useBetaBaseUrl (optional), authorizationKey (optional when MCP_ADMIN_AUTH_KEY is configured)",
+      response: "ok/status/data with Graph subscription object",
+      failures: "400 invalid subscription payload, 401 unauthorized admin key for mutation, 403 permission failures, 429 throttling, 5xx upstream errors",
+      safety: "this mutates webhook subscription state and can deliver sensitive change notifications",
+      prerequisite: "graph_health_check",
+      followUp: "graph_api_request, copilot_interactions_list",
+      example: '{"name":"copilot_change_notifications_create_subscription","arguments":{"changeType":"created,updated,deleted","notificationUrl":"https://example.com/webhook","resource":"/copilot/interactionHistory/getAllEnterpriseInteractions","expirationDateTime":"2026-12-01T00:00:00Z"}}'
+    }),
+    {
+      changeType: z.string().min(1),
+      notificationUrl: z.string().min(1),
+      resource: z.string().min(1),
+      includeResourceData: z.boolean().optional(),
+      encryptionCertificate: z.string().min(1).optional(),
+      encryptionCertificateId: z.string().min(1).optional(),
+      expirationDateTime: z.string().min(1),
+      clientState: z.string().min(1).optional(),
+      lifecycleNotificationUrl: z.string().min(1).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional(),
+      authorizationKey: z.string().min(1).optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ changeType, notificationUrl, resource, includeResourceData, encryptionCertificate, encryptionCertificateId, expirationDateTime, clientState, lifecycleNotificationUrl, userId, tokenId, useBetaBaseUrl, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await graphClient.request({
+          method: "POST",
+          path: "/subscriptions",
+          body: {
+            changeType,
+            notificationUrl,
+            resource,
+            includeResourceData,
+            encryptionCertificate,
+            encryptionCertificateId,
+            expirationDateTime,
+            clientState,
+            lifecycleNotificationUrl
+          },
+          userId,
+          tokenId,
+          useBetaBaseUrl
+        })
+      };
+    })
+  );
+
+  server.tool(
+    "copilot_usage_report_user_count_summary",
+    toolText({
+      summary: "Get Microsoft 365 Copilot user count summary report.",
+      useWhen: "you need aggregated enabled and active user counts for a reporting period",
+      doNotUseWhen: "you need trend-by-day or per-user detail reports",
+      permissions: "Reports.Read.All with required admin role for delegated usage reporting",
+      environment: "GETs /copilot/reports/getMicrosoft365CopilotUserCountSummary(period, version)",
+      parameters: "period (required enum D7,D28,D30,D90,D180,ALL), version (optional v1/v2), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data as CSV stream in v1 or JSON in beta",
+      failures: "400 invalid period/version, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_usage_report_user_count_trend, copilot_usage_report_user_detail",
+      example: '{"name":"copilot_usage_report_user_count_summary","arguments":{"period":"D7","version":"v2"}}'
+    }),
+    {
+      period: z.enum(["D7", "D28", "D30", "D90", "D180", "ALL"]),
+      version: z.enum(["v1", "v2"]).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ period, version, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: buildCopilotReportPath("getMicrosoft365CopilotUserCountSummary", period, version),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_usage_report_user_count_trend",
+    toolText({
+      summary: "Get Microsoft 365 Copilot user count trend report.",
+      useWhen: "you need daily trend of enabled and active users across the selected period",
+      doNotUseWhen: "you only need a single aggregated summary row or per-user detail",
+      permissions: "Reports.Read.All with required admin role for delegated usage reporting",
+      environment: "GETs /copilot/reports/getMicrosoft365CopilotUserCountTrend(period, version)",
+      parameters: "period (required enum D7,D28,D30,D90,D180,ALL), version (optional v1/v2), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data as CSV stream in v1 or JSON in beta",
+      failures: "400 invalid period/version, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_usage_report_user_count_summary, copilot_usage_report_user_detail",
+      example: '{"name":"copilot_usage_report_user_count_trend","arguments":{"period":"D30","version":"v2"}}'
+    }),
+    {
+      period: z.enum(["D7", "D28", "D30", "D90", "D180", "ALL"]),
+      version: z.enum(["v1", "v2"]).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ period, version, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: buildCopilotReportPath("getMicrosoft365CopilotUserCountTrend", period, version),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_usage_report_user_detail",
+    toolText({
+      summary: "Get Microsoft 365 Copilot usage report by user.",
+      useWhen: "you need per-user activity details and last-activity timestamps for Copilot usage",
+      doNotUseWhen: "you only need aggregated summary or trend counts",
+      permissions: "Reports.Read.All with required admin role for delegated usage reporting",
+      environment: "GETs /copilot/reports/getMicrosoft365CopilotUsageUserDetail(period, version)",
+      parameters: "period (required enum D7,D28,D30,D90,D180,ALL), version (optional v1/v2), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data as CSV stream in v1 or JSON in beta",
+      failures: "400 invalid period/version, 401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "contains user-level activity details and should be handled as sensitive reporting data",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_usage_report_user_count_summary, copilot_usage_report_user_count_trend",
+      example: '{"name":"copilot_usage_report_user_detail","arguments":{"period":"D7","version":"v2"}}'
+    }),
+    {
+      period: z.enum(["D7", "D28", "D30", "D90", "D180", "ALL"]),
+      version: z.enum(["v1", "v2"]).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ period, version, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: buildCopilotReportPath("getMicrosoft365CopilotUsageUserDetail", period, version),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_packages_list",
+    toolText({
+      summary: "List Copilot packages (agents) from the organization catalog.",
+      useWhen: "you need organization-wide inventory of agents and package metadata",
+      doNotUseWhen: "you need details for a specific package ID",
+      permissions: "Copilot package management permissions and licensing in tenant",
+      environment: "GETs /copilot/admin/catalog/packages",
+      parameters: "filter/select/orderby/top/skip (optional), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data.value with package rows",
+      failures: "401/403 token or permission failures, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "graph_health_check",
+      followUp: "copilot_package_get, copilot_package_update",
+      example: '{"name":"copilot_packages_list","arguments":{"top":25}}'
+    }),
+    {
+      filter: z.string().min(1).optional(),
+      select: z.string().min(1).optional(),
+      orderby: z.string().min(1).optional(),
+      top: z.union([z.string(), z.number()]).optional(),
+      skip: z.union([z.string(), z.number()]).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ filter, select, orderby, top, skip, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: "/copilot/admin/catalog/packages",
+        query: normalizeQuery({ $filter: filter, $select: select, $orderby: orderby, $top: top, $skip: skip }),
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_package_get",
+    toolText({
+      summary: "Get details for a specific Copilot package (agent).",
+      useWhen: "you need metadata or element details for one package",
+      doNotUseWhen: "you need a broad inventory list",
+      permissions: "Copilot package management permissions and licensing in tenant",
+      environment: "GETs /copilot/admin/catalog/packages/{id}",
+      parameters: "packageId (required string), userId/tokenId/useBetaBaseUrl (optional)",
+      response: "ok/status/data with package detail object",
+      failures: "401/403 token or permission failures, 404 package not found, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "copilot_packages_list",
+      followUp: "copilot_package_update, copilot_package_block",
+      example: '{"name":"copilot_package_get","arguments":{"packageId":"<package-id>"}}'
+    }),
+    {
+      packageId: z.string().min(1),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ packageId, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path: `/copilot/admin/catalog/packages/${encodeURIComponent(packageId)}`,
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
+    "copilot_package_update",
+    toolText({
+      summary: "Update metadata for a Copilot package (preview operation).",
+      useWhen: "you need to patch package settings in the organization catalog",
+      doNotUseWhen: "you only need read-only package inspection",
+      permissions: "MCP_ADMIN_AUTH_KEY when configured plus Copilot package management permissions",
+      environment: "PATCHes /copilot/admin/catalog/packages/{id}",
+      parameters: "packageId (required string), body (required object), userId/tokenId/useBetaBaseUrl (optional), authorizationKey (optional when MCP_ADMIN_AUTH_KEY is configured)",
+      response: "ok/status/data with upstream update response",
+      failures: "400 invalid patch body, 401 unauthorized admin key, 403 package permission failures, 404 package not found, 429 throttling, 5xx upstream errors",
+      safety: "this mutates package metadata and can impact tenant-wide agent behavior",
+      prerequisite: "copilot_package_get",
+      followUp: "copilot_package_get, copilot_packages_list",
+      example: '{"name":"copilot_package_update","arguments":{"packageId":"<package-id>","body":{"displayName":"New Name"},"authorizationKey":"<admin-key-if-required>"}}'
+    }),
+    {
+      packageId: z.string().min(1),
+      body: z.record(z.any()),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional(),
+      authorizationKey: z.string().min(1).optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ packageId, body, userId, tokenId, useBetaBaseUrl, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await graphClient.request({
+          method: "PATCH",
+          path: `/copilot/admin/catalog/packages/${encodeURIComponent(packageId)}`,
+          body,
+          userId,
+          tokenId,
+          useBetaBaseUrl
+        })
+      };
+    })
+  );
+
+  server.tool(
+    "copilot_package_block",
+    toolText({
+      summary: "Block a Copilot package in the organization catalog (preview operation).",
+      useWhen: "you need to disable package usage across the organization",
+      doNotUseWhen: "you only need read-only inspection",
+      permissions: "MCP_ADMIN_AUTH_KEY when configured plus Copilot package management permissions",
+      environment: "POSTs /copilot/admin/catalog/packages/{id}/block",
+      parameters: "packageId (required string), body (optional object), userId/tokenId/useBetaBaseUrl (optional), authorizationKey (optional when MCP_ADMIN_AUTH_KEY is configured)",
+      response: "ok/status/data with upstream block response",
+      failures: "401 unauthorized admin key, 403 package permission failures, 404 package not found, 429 throttling, 5xx upstream errors",
+      safety: "this mutates package availability tenant-wide",
+      prerequisite: "copilot_package_get",
+      followUp: "copilot_package_get, copilot_package_unblock",
+      example: '{"name":"copilot_package_block","arguments":{"packageId":"<package-id>","authorizationKey":"<admin-key-if-required>"}}'
+    }),
+    {
+      packageId: z.string().min(1),
+      body: z.record(z.any()).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional(),
+      authorizationKey: z.string().min(1).optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ packageId, body, userId, tokenId, useBetaBaseUrl, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await graphClient.request({
+          method: "POST",
+          path: `/copilot/admin/catalog/packages/${encodeURIComponent(packageId)}/block`,
+          body: body ?? {},
+          userId,
+          tokenId,
+          useBetaBaseUrl
+        })
+      };
+    })
+  );
+
+  server.tool(
+    "copilot_package_unblock",
+    toolText({
+      summary: "Unblock a Copilot package in the organization catalog (preview operation).",
+      useWhen: "you need to re-enable package usage across the organization",
+      doNotUseWhen: "you only need read-only inspection",
+      permissions: "MCP_ADMIN_AUTH_KEY when configured plus Copilot package management permissions",
+      environment: "POSTs /copilot/admin/catalog/packages/{id}/unblock",
+      parameters: "packageId (required string), body (optional object), userId/tokenId/useBetaBaseUrl (optional), authorizationKey (optional when MCP_ADMIN_AUTH_KEY is configured)",
+      response: "ok/status/data with upstream unblock response",
+      failures: "401 unauthorized admin key, 403 package permission failures, 404 package not found, 429 throttling, 5xx upstream errors",
+      safety: "this mutates package availability tenant-wide",
+      prerequisite: "copilot_package_get",
+      followUp: "copilot_package_get, copilot_package_block",
+      example: '{"name":"copilot_package_unblock","arguments":{"packageId":"<package-id>","authorizationKey":"<admin-key-if-required>"}}'
+    }),
+    {
+      packageId: z.string().min(1),
+      body: z.record(z.any()).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional(),
+      authorizationKey: z.string().min(1).optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ packageId, body, userId, tokenId, useBetaBaseUrl, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await graphClient.request({
+          method: "POST",
+          path: `/copilot/admin/catalog/packages/${encodeURIComponent(packageId)}/unblock`,
+          body: body ?? {},
+          userId,
+          tokenId,
+          useBetaBaseUrl
+        })
+      };
+    })
+  );
+
+  server.tool(
+    "copilot_package_reassign",
+    toolText({
+      summary: "Reassign ownership of a Copilot package (preview operation).",
+      useWhen: "you need to transfer package ownership",
+      doNotUseWhen: "you only need read-only package inspection",
+      permissions: "MCP_ADMIN_AUTH_KEY when configured plus Copilot package management permissions",
+      environment: "POSTs /copilot/admin/catalog/packages/{id}/reassign",
+      parameters: "packageId (required string), body (required object), userId/tokenId/useBetaBaseUrl (optional), authorizationKey (optional when MCP_ADMIN_AUTH_KEY is configured)",
+      response: "ok/status/data with upstream reassign response",
+      failures: "400 invalid request body, 401 unauthorized admin key, 403 package permission failures, 404 package not found, 429 throttling, 5xx upstream errors",
+      safety: "this mutates ownership metadata and affects administrative control",
+      prerequisite: "copilot_package_get",
+      followUp: "copilot_package_get, copilot_packages_list",
+      example: '{"name":"copilot_package_reassign","arguments":{"packageId":"<package-id>","body":{"newOwner":"<user-id>"},"authorizationKey":"<admin-key-if-required>"}}'
+    }),
+    {
+      packageId: z.string().min(1),
+      body: z.record(z.any()),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional(),
+      authorizationKey: z.string().min(1).optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ packageId, body, userId, tokenId, useBetaBaseUrl, authorizationKey }) => {
+      assertAuthorized(adminAuthKey, authorizationKey);
+      return {
+        ok: true,
+        status: 200,
+        data: await graphClient.request({
+          method: "POST",
+          path: `/copilot/admin/catalog/packages/${encodeURIComponent(packageId)}/reassign`,
+          body,
+          userId,
+          tokenId,
+          useBetaBaseUrl
+        })
+      };
+    })
   );
 
   server.tool(
@@ -581,6 +1359,195 @@ export function createMcpServer({ name, version, graphClient, office365Client, a
         ok: true,
         status: 200,
         data: await office365Client.apiRequest({ method: normalizedMethod, path, query, body, headers, tenantId, publisherIdentifier, userId, tokenId, authorizationKey })
+      };
+    })
+  );
+
+  server.tool(
+    "office365_service_comms_connection_info",
+    toolText({
+      summary: "Return Office 365 Service Communications API runtime metadata and tenant scope defaults.",
+      useWhen: "you need to confirm the ServiceComms base URL, default tenant, or token model before reading service health data",
+      doNotUseWhen: "you need live service status or message data; use the specific ServiceComms tools instead",
+      permissions: "none",
+      environment: "reports the resolved ServiceComms API base URL and default tenant scope",
+      parameters: "none",
+      response: "ok/status/data with server and ServiceComms connection details",
+      failures: "500 if metadata assembly fails",
+      safety: "",
+      prerequisite: "none",
+      followUp: "office365_service_comms_list_services, office365_service_comms_get_current_status",
+      example: '{"name":"office365_service_comms_connection_info","arguments":{}}'
+    }),
+    {},
+    withErrorHandling(allowSensitiveOutput, async () => ({
+      ok: true,
+      status: 200,
+      data: {
+        server: {
+          name,
+          version,
+          adminAuthConfigured: Boolean(adminAuthKey),
+          allowSensitiveOutput: Boolean(allowSensitiveOutput),
+          scopeModel: makeScopeModel({ appName, defaultUserId })
+        },
+        serviceComms: {
+          baseUrl: office365Client.baseUrl,
+          defaultTenantId: office365Client.defaultTenantId || null,
+          tokenModel: "multi-user-vault",
+          api: "office-365-service-communications"
+        }
+      }
+    }))
+  );
+
+  server.tool(
+    "office365_service_comms_scope_info",
+    toolText({
+      summary: "Return the effective tenant scope used for Office 365 Service Communications API calls.",
+      useWhen: "you need to know which tenant a service health or message query will target",
+      doNotUseWhen: "you only need the runtime metadata; use office365_service_comms_connection_info instead",
+      permissions: "none",
+      environment: "defaults tenantId from environment when omitted",
+      parameters: "tenantId (optional string), userId (optional string)",
+      response: "ok/status/data with tenantId and token scope details",
+      failures: "400 if tenant validation fails, 500 on normalization errors",
+      safety: "",
+      prerequisite: "none",
+      followUp: "office365_service_comms_list_services, office365_service_comms_get_messages",
+      example: '{"name":"office365_service_comms_scope_info","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000"}}'
+    }),
+    { tenantId: z.string().min(1).optional(), userId: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, userId }) => ({
+      ok: true,
+      status: 200,
+      data: office365Client.scope({ tenantId, userId })
+    }))
+  );
+
+  server.tool(
+    "office365_service_comms_list_services",
+    toolText({
+      summary: "List subscribed Office 365 services from ServiceComms.",
+      useWhen: "you need the catalog of subscribed services before drilling into health or incidents",
+      doNotUseWhen: "you need service status or message timelines; use current or historical status instead",
+      permissions: "a valid ServiceComms OAuth token with ServiceHealth.Read",
+      environment: "GETs the tenant-scoped /ServiceComms/Services endpoint with optional $select",
+      parameters: "tenantId (required string), userId (optional string), select (optional string)",
+      response: "ok/status/data.value with Service entities",
+      failures: "401/403 invalid token or missing ServiceHealth.Read, 404 invalid tenant, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_service_comms_connection_info",
+      followUp: "office365_service_comms_get_current_status, office365_service_comms_api_request",
+      example: '{"name":"office365_service_comms_list_services","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000"}}'
+    }),
+    { tenantId: z.string().min(1), userId: z.string().min(1).optional(), select: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, userId, select }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.listServices({ tenantId, userId, select })
+    }))
+  );
+
+  server.tool(
+    "office365_service_comms_get_current_status",
+    toolText({
+      summary: "Get the current status of Office 365 services from ServiceComms.",
+      useWhen: "you need a real-time view of service health and incidents for the tenant",
+      doNotUseWhen: "you need a historical trend or message feed; use the historical or messages tool instead",
+      permissions: "a valid ServiceComms OAuth token with ServiceHealth.Read",
+      environment: "GETs the tenant-scoped /ServiceComms/CurrentStatus endpoint with optional workload filtering",
+      parameters: "tenantId (required string), userId (optional string), workload (optional string), select (optional string)",
+      response: "ok/status/data.value with WorkloadStatus entities",
+      failures: "401/403 invalid token or missing ServiceHealth.Read, 404 invalid tenant, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_service_comms_list_services",
+      followUp: "office365_service_comms_get_historical_status, office365_service_comms_api_request",
+      example: '{"name":"office365_service_comms_get_current_status","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","workload":"Exchange"}}'
+    }),
+    { tenantId: z.string().min(1), userId: z.string().min(1).optional(), workload: z.string().min(1).optional(), select: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, userId, workload, select }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.getCurrentStatus({ tenantId, userId, workload, select })
+    }))
+  );
+
+  server.tool(
+    "office365_service_comms_get_historical_status",
+    toolText({
+      summary: "Get the historical status timeline of Office 365 services from ServiceComms.",
+      useWhen: "you need incident history or a day-by-day status view",
+      doNotUseWhen: "you need the latest incident feed or messages; use current status or messages instead",
+      permissions: "a valid ServiceComms OAuth token with ServiceHealth.Read",
+      environment: "GETs the tenant-scoped /ServiceComms/HistoricalStatus endpoint with optional workload and statusTime filters",
+      parameters: "tenantId (required string), userId (optional string), workload (optional string), statusTime (optional datetime), select (optional string)",
+      response: "ok/status/data.value with WorkloadStatus entities",
+      failures: "401/403 invalid token or missing ServiceHealth.Read, 404 invalid tenant, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_service_comms_get_current_status",
+      followUp: "office365_service_comms_get_messages, office365_service_comms_api_request",
+      example: '{"name":"office365_service_comms_get_historical_status","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","workload":"Exchange"}}'
+    }),
+    { tenantId: z.string().min(1), userId: z.string().min(1).optional(), workload: z.string().min(1).optional(), statusTime: z.string().min(1).optional(), select: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, userId, workload, statusTime, select }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.getHistoricalStatus({ tenantId, userId, workload, statusTime, select })
+    }))
+  );
+
+  server.tool(
+    "office365_service_comms_get_messages",
+    toolText({
+      summary: "Get ServiceComms messages for incidents or message center updates.",
+      useWhen: "you need incident details, message center communications, or change timelines",
+      doNotUseWhen: "you need service status only; use the current or historical status tool instead",
+      permissions: "a valid ServiceComms OAuth token with ServiceHealth.Read",
+      environment: "GETs the tenant-scoped /ServiceComms/Messages endpoint with optional workload, time range, and paging filters",
+      parameters: "tenantId (required string), userId (optional string), workload (optional string), startTime (optional datetime), endTime (optional datetime), messageType (optional string), id (optional string), top (optional integer), skip (optional integer), select (optional string)",
+      response: "ok/status/data.value with Message entities",
+      failures: "401/403 invalid token or missing ServiceHealth.Read, 400 invalid time window or paging constraints, 404 invalid tenant, 429 throttling, 5xx upstream errors",
+      safety: "",
+      prerequisite: "office365_service_comms_get_current_status",
+      followUp: "office365_service_comms_api_request, office365_service_comms_list_services",
+      example: '{"name":"office365_service_comms_get_messages","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","workload":"Exchange","top":10}}'
+    }),
+    { tenantId: z.string().min(1), userId: z.string().min(1).optional(), workload: z.string().min(1).optional(), startTime: z.string().min(1).optional(), endTime: z.string().min(1).optional(), messageType: z.string().min(1).optional(), id: z.string().min(1).optional(), top: z.union([z.number(), z.string()]).optional(), skip: z.union([z.number(), z.string()]).optional(), select: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ tenantId, userId, workload, startTime, endTime, messageType, id, top, skip, select }) => ({
+      ok: true,
+      status: 200,
+      data: await office365Client.getMessages({ tenantId, userId, workload, startTime, endTime, messageType, id, top, skip, select })
+    }))
+  );
+
+  server.tool(
+    "office365_service_comms_api_request",
+    toolText({
+      summary: "Run a generic Office 365 Service Communications API request.",
+      useWhen: "you need a supported ServiceComms endpoint that is not covered by a dedicated tool",
+      doNotUseWhen: "a specialized ServiceComms tool already models the operation more safely",
+      permissions: "a valid ServiceComms OAuth token with ServiceHealth.Read",
+      environment: "method is normalized to uppercase and path is resolved against the tenant-scoped ServiceComms root",
+      parameters: "method (required string), path (required string), query (optional object), body (optional JSON), headers (optional object), tenantId (required string), userId (optional string), tokenId (optional string), authorizationKey (optional string for mutating calls)",
+      response: "ok/status/data plus request metadata and response headers",
+      failures: "400 invalid path, query, or body; 401 missing or invalid token or admin key; 403 upstream permission failure; 404 not found; 429 throttling; 5xx upstream or transport failure",
+      safety: "treat POST, PUT, PATCH, and DELETE as destructive-capable operations",
+      prerequisite: "office365_service_comms_connection_info",
+      followUp: "office365_service_comms_list_services or another read tool for validation",
+      example: '{"name":"office365_service_comms_api_request","arguments":{"tenantId":"00000000-0000-0000-0000-000000000000","method":"GET","path":"/Messages"}}'
+    }),
+    { method: z.string().min(1), path: z.string().min(1), query: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(), body: z.any().optional(), headers: z.record(z.string(), z.string()).optional(), tenantId: z.string().min(1), userId: z.string().min(1).optional(), tokenId: z.string().min(1).optional(), authorizationKey: z.string().min(1).optional() },
+    withErrorHandling(allowSensitiveOutput, async ({ method, path, query, body, headers, tenantId, userId, tokenId, authorizationKey }) => {
+      const normalizedMethod = normalizeMethod(method);
+      if (MUTATING_METHODS.has(normalizedMethod)) {
+        assertAuthorized(adminAuthKey, authorizationKey);
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        data: await office365Client.requestServiceComms({ method: normalizedMethod, path, query, body, headers, tenantId, userId, tokenId, authorizationKey })
       };
     })
   );

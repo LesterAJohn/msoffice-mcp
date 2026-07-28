@@ -60,16 +60,29 @@ function createGraphClientMock() {
             path: "/users/$count",
             query: {},
             entity: "user",
+            mcpTool: "microsoft_graph_get",
             confidence: 1
           }
         ]
       };
     },
     listProperties(entity) {
+      const normalizedEntity = String(entity ?? "").trim().toLowerCase();
+      if (normalizedEntity === "user") {
+        return {
+          entity: "user",
+          properties: ["displayName", "id"],
+          relationships: ["memberOf"],
+          recommendedTools: ["graph_users_query", "microsoft_graph_get", "graph_api_request"]
+        };
+      }
+
       return {
-        entity,
-        properties: ["displayName", "id"],
-        relationships: ["memberOf"]
+        entity: normalizedEntity || null,
+        properties: [],
+        relationships: [],
+        recommendedTools: [],
+        knownEntities: ["user", "group", "application", "device", "copilot_package"]
       };
     },
     async healthCheck() {
@@ -198,6 +211,36 @@ test("mutating graph tools require authorizationKey when admin key is configured
     });
     assert.equal(tokenAuthorized.payload.ok, true);
     assert.equal(calls.updateToken.length, 1);
+
+    const copilotMutationUnauthorized = await invokeTool(server, "copilot_package_block", {
+      packageId: "pkg-1"
+    });
+    assert.equal(copilotMutationUnauthorized.result.isError, true);
+    assert.equal(copilotMutationUnauthorized.payload.status, 401);
+
+    const copilotMutationAuthorized = await invokeTool(server, "copilot_package_block", {
+      packageId: "pkg-1",
+      authorizationKey: "super-secret"
+    });
+    assert.equal(copilotMutationAuthorized.payload.ok, true);
+
+    const subscriptionUnauthorized = await invokeTool(server, "copilot_change_notifications_create_subscription", {
+      changeType: "created,updated,deleted",
+      notificationUrl: "https://example.com/webhook",
+      resource: "/copilot/interactionHistory/getAllEnterpriseInteractions",
+      expirationDateTime: "2026-12-01T00:00:00Z"
+    });
+    assert.equal(subscriptionUnauthorized.result.isError, true);
+    assert.equal(subscriptionUnauthorized.payload.status, 401);
+
+    const subscriptionAuthorized = await invokeTool(server, "copilot_change_notifications_create_subscription", {
+      changeType: "created,updated,deleted",
+      notificationUrl: "https://example.com/webhook",
+      resource: "/copilot/interactionHistory/getAllEnterpriseInteractions",
+      expirationDateTime: "2026-12-01T00:00:00Z",
+      authorizationKey: "super-secret"
+    });
+    assert.equal(subscriptionAuthorized.payload.ok, true);
   } finally {
     restoreEnv();
   }
@@ -230,7 +273,7 @@ test("graph_api_request normalizes method and path", async () => {
 test("official Microsoft Graph tools are exposed", async () => {
   const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
   try {
-    const { client } = createGraphClientMock();
+    const { client, calls } = createGraphClientMock();
     const server = createMcpServer({
       name: "msoffice-mcp",
       version: "0.1.0",
@@ -245,16 +288,136 @@ test("official Microsoft Graph tools are exposed", async () => {
     assert.equal(suggest.payload.ok, true);
     assert.ok(Array.isArray(suggest.payload.data.suggestions));
     assert.ok(suggest.payload.data.suggestions.length > 0);
+    assert.equal(suggest.payload.data.suggestions[0].mcpTool, "microsoft_graph_get");
 
     const properties = await invokeTool(server, "microsoft_graph_list_properties", { entity: "user" });
     assert.equal(properties.payload.ok, true);
     assert.equal(properties.payload.data.entity, "user");
     assert.ok(properties.payload.data.properties.includes("displayName"));
+    assert.ok(properties.payload.data.recommendedTools.includes("graph_users_query"));
+
+    const unknownProperties = await invokeTool(server, "microsoft_graph_list_properties", { entity: "unknown_entity" });
+    assert.equal(unknownProperties.payload.ok, true);
+    assert.equal(unknownProperties.payload.data.entity, "unknown_entity");
+    assert.ok(Array.isArray(unknownProperties.payload.data.recommendedTools));
+    assert.equal(unknownProperties.payload.data.recommendedTools.length, 0);
 
     const readOnly = await invokeTool(server, "microsoft_graph_get", { path: "/users/$count" });
     assert.equal(readOnly.payload.ok, true);
     assert.equal(readOnly.payload.data.echoed.method, "GET");
     assert.equal(readOnly.payload.data.echoed.path, "/users/$count");
+
+    const capabilities = await invokeTool(server, "copilot_api_capabilities");
+    assert.equal(capabilities.payload.ok, true);
+    assert.ok(Array.isArray(capabilities.payload.data.capabilities));
+    assert.ok(capabilities.payload.data.capabilities.length > 0);
+
+    const retrieval = await invokeTool(server, "copilot_retrieval_query", {
+      queryString: "How to setup corporate VPN?",
+      dataSource: "sharePoint"
+    });
+    assert.equal(retrieval.payload.ok, true);
+
+    const search = await invokeTool(server, "copilot_search_query", {
+      query: "quarterly budget analysis"
+    });
+    assert.equal(search.payload.ok, true);
+
+    const createConversation = await invokeTool(server, "copilot_chat_create_conversation", {});
+    assert.equal(createConversation.payload.ok, true);
+
+    const syncChat = await invokeTool(server, "copilot_chat_send_message", {
+      conversationId: "conversation-1",
+      messageText: "What meeting do I have at 9 AM tomorrow morning?",
+      locationHint: { timeZone: "America/New_York" }
+    });
+    assert.equal(syncChat.payload.ok, true);
+
+    const streamChat = await invokeTool(server, "copilot_chat_send_message_stream", {
+      conversationId: "conversation-1",
+      messageText: "Summarize this document for me.",
+      locationHint: { timeZone: "America/New_York" }
+    });
+    assert.equal(streamChat.payload.ok, true);
+
+    const interactions = await invokeTool(server, "copilot_interactions_list", {
+      interactionUserId: "user-1",
+      top: 100
+    });
+    assert.equal(interactions.payload.ok, true);
+
+    const meetingInsightsList = await invokeTool(server, "copilot_meeting_insights_list", {
+      meetingUserId: "user-1",
+      onlineMeetingId: "meeting-1"
+    });
+    assert.equal(meetingInsightsList.payload.ok, true);
+
+    const meetingInsightGet = await invokeTool(server, "copilot_meeting_insight_get", {
+      meetingUserId: "user-1",
+      onlineMeetingId: "meeting-1",
+      aiInsightId: "insight-1"
+    });
+    assert.equal(meetingInsightGet.payload.ok, true);
+
+    const usageSummary = await invokeTool(server, "copilot_usage_report_user_count_summary", {
+      period: "D7",
+      version: "v2"
+    });
+    assert.equal(usageSummary.payload.ok, true);
+
+    const usageTrend = await invokeTool(server, "copilot_usage_report_user_count_trend", {
+      period: "D30"
+    });
+    assert.equal(usageTrend.payload.ok, true);
+
+    const usageDetail = await invokeTool(server, "copilot_usage_report_user_detail", {
+      period: "D90"
+    });
+    assert.equal(usageDetail.payload.ok, true);
+
+    const packages = await invokeTool(server, "copilot_packages_list", {
+      top: 25
+    });
+    assert.equal(packages.payload.ok, true);
+
+    const packageGet = await invokeTool(server, "copilot_package_get", {
+      packageId: "pkg-1"
+    });
+    assert.equal(packageGet.payload.ok, true);
+
+    const packageUpdate = await invokeTool(server, "copilot_package_update", {
+      packageId: "pkg-1",
+      body: { displayName: "Updated Name" }
+    });
+    assert.equal(packageUpdate.payload.ok, true);
+
+    const packageUnblock = await invokeTool(server, "copilot_package_unblock", {
+      packageId: "pkg-1"
+    });
+    assert.equal(packageUnblock.payload.ok, true);
+
+    const packageReassign = await invokeTool(server, "copilot_package_reassign", {
+      packageId: "pkg-1",
+      body: { newOwner: "user-2" }
+    });
+    assert.equal(packageReassign.payload.ok, true);
+
+    const paths = calls.request.map((entry) => entry.path);
+    assert.ok(paths.includes("/copilot/retrieval"));
+    assert.ok(paths.includes("/copilot/search"));
+    assert.ok(paths.includes("/copilot/conversations"));
+    assert.ok(paths.includes("/copilot/conversations/conversation-1/chat"));
+    assert.ok(paths.includes("/copilot/conversations/conversation-1/chatOverStream"));
+    assert.ok(paths.includes("/copilot/users/user-1/interactionHistory/getAllEnterpriseInteractions"));
+    assert.ok(paths.includes("/copilot/users/user-1/onlineMeetings/meeting-1/aiInsights"));
+    assert.ok(paths.includes("/copilot/users/user-1/onlineMeetings/meeting-1/aiInsights/insight-1"));
+    assert.ok(paths.includes("/copilot/reports/getMicrosoft365CopilotUserCountSummary(period='D7', version='v2')"));
+    assert.ok(paths.includes("/copilot/reports/getMicrosoft365CopilotUserCountTrend(period='D30')"));
+    assert.ok(paths.includes("/copilot/reports/getMicrosoft365CopilotUsageUserDetail(period='D90')"));
+    assert.ok(paths.includes("/copilot/admin/catalog/packages"));
+    assert.ok(paths.includes("/copilot/admin/catalog/packages/pkg-1"));
+    assert.ok(paths.includes("/copilot/admin/catalog/packages/pkg-1/unblock"));
+    assert.ok(paths.includes("/copilot/admin/catalog/packages/pkg-1/reassign"));
   } finally {
     restoreEnv();
   }

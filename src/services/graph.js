@@ -274,6 +274,13 @@ export class GraphServiceClient {
       { family: "security", examples: ["/security/alerts_v2", "/security/cases"] },
       { family: "applications", examples: ["/applications", "/servicePrincipals"] },
       { family: "devices", examples: ["/devices", "/deviceManagement"] },
+      { family: "copilot-retrieval", examples: ["POST /copilot/retrieval"] },
+      { family: "copilot-search-preview", examples: ["POST /copilot/search"] },
+      { family: "copilot-chat-preview", examples: ["POST /copilot/conversations", "POST /copilot/conversations/{id}/chat"] },
+      { family: "copilot-interaction-export", examples: ["/copilot/users/{id}/interactionHistory/getAllEnterpriseInteractions"] },
+      { family: "copilot-meeting-insights", examples: ["/copilot/users/{id}/onlineMeetings/{meetingId}/aiInsights"] },
+      { family: "copilot-usage-reports", examples: ["/copilot/reports/getMicrosoft365CopilotUserCountSummary(period='D7')"] },
+      { family: "copilot-package-management", examples: ["/copilot/admin/catalog/packages"] },
       { family: "beta", examples: ["Use betaBaseUrl for beta endpoints"] },
       { family: "generic-request", examples: ["Any Graph REST path via graph_api_request"] }
     ];
@@ -288,7 +295,8 @@ export class GraphServiceClient {
         method: "GET",
         path: "/users/$count",
         query: {},
-        entity: "user"
+        entity: "user",
+        mcpTool: "microsoft_graph_get"
       },
       {
         intent: ["inactive", "sign in", "signin", "last month"],
@@ -296,7 +304,8 @@ export class GraphServiceClient {
         method: "GET",
         path: "/users",
         query: { $filter: "signInActivity/lastSignInDateTime le 2026-06-28T00:00:00Z" },
-        entity: "user"
+        entity: "user",
+        mcpTool: "graph_users_query"
       },
       {
         intent: ["guest", "users"],
@@ -304,7 +313,8 @@ export class GraphServiceClient {
         method: "GET",
         path: "/users",
         query: { $filter: "userType eq 'Guest'" },
-        entity: "user"
+        entity: "user",
+        mcpTool: "graph_users_query"
       },
       {
         intent: ["group", "member"],
@@ -312,7 +322,8 @@ export class GraphServiceClient {
         method: "GET",
         path: "/groups",
         query: {},
-        entity: "group"
+        entity: "group",
+        mcpTool: "graph_groups_query"
       },
       {
         intent: ["license", "copilot"],
@@ -320,7 +331,8 @@ export class GraphServiceClient {
         method: "GET",
         path: "/users",
         query: { $select: "id,displayName,assignedLicenses" },
-        entity: "user"
+        entity: "user",
+        mcpTool: "graph_users_query"
       },
       {
         intent: ["device"],
@@ -328,7 +340,8 @@ export class GraphServiceClient {
         method: "GET",
         path: "/devices",
         query: {},
-        entity: "device"
+        entity: "device",
+        mcpTool: "graph_devices_query"
       },
       {
         intent: ["application", "app registration"],
@@ -336,7 +349,71 @@ export class GraphServiceClient {
         method: "GET",
         path: "/applications",
         query: {},
-        entity: "application"
+        entity: "application",
+        mcpTool: "graph_applications_query"
+      },
+      {
+        intent: ["copilot", "retrieval", "grounding"],
+        description: "Run a Copilot retrieval query",
+        method: "POST",
+        path: "/copilot/retrieval",
+        query: {},
+        entity: "copilot",
+        mcpTool: "copilot_retrieval_query"
+      },
+      {
+        intent: ["copilot", "search"],
+        description: "Run a Copilot search query (preview)",
+        method: "POST",
+        path: "/copilot/search",
+        query: {},
+        entity: "copilot",
+        mcpTool: "copilot_search_query"
+      },
+      {
+        intent: ["copilot", "interaction", "export"],
+        description: "List Copilot interactions for a user",
+        method: "GET",
+        path: "/copilot/users/{id}/interactionHistory/getAllEnterpriseInteractions",
+        query: { $top: 100 },
+        entity: "copilot_interaction",
+        mcpTool: "copilot_interactions_list"
+      },
+      {
+        intent: ["copilot", "chat", "conversation", "start"],
+        description: "Create a Copilot conversation (preview)",
+        method: "POST",
+        path: "/copilot/conversations",
+        query: {},
+        entity: "copilot_conversation",
+        mcpTool: "copilot_chat_create_conversation"
+      },
+      {
+        intent: ["copilot", "meeting", "insight"],
+        description: "List Copilot meeting AI insights",
+        method: "GET",
+        path: "/copilot/users/{id}/onlineMeetings/{meetingId}/aiInsights",
+        query: {},
+        entity: "copilot_meeting_insight",
+        mcpTool: "copilot_meeting_insights_list"
+      },
+      {
+        intent: ["copilot", "usage", "report", "summary"],
+        description: "Get Copilot user count summary report",
+        method: "GET",
+        path: "/copilot/reports/getMicrosoft365CopilotUserCountSummary(period='D7', version='v2')",
+        query: {},
+        entity: "copilot_usage_report",
+        mcpTool: "copilot_usage_report_user_count_summary"
+      },
+      {
+        intent: ["copilot", "package", "catalog", "agent"],
+        description: "List Copilot packages (agents)",
+        method: "GET",
+        path: "/copilot/admin/catalog/packages",
+        query: { $top: 25 },
+        entity: "copilot_package",
+        mcpTool: "copilot_packages_list"
       }
     ];
 
@@ -356,6 +433,7 @@ export class GraphServiceClient {
         path: entry.path,
         query: entry.query,
         entity: entry.entity,
+        mcpTool: entry.mcpTool,
         confidence: Math.min(1, entry.score / entry.intent.length)
       }))
     };
@@ -363,6 +441,35 @@ export class GraphServiceClient {
 
   listProperties(entity) {
     const normalizedEntity = String(entity ?? "").trim().toLowerCase();
+    const aliases = {
+      copilot: "copilot",
+      "copilot-interaction": "copilot_interaction",
+      copilotinteraction: "copilot_interaction",
+      "copilot-meeting-insight": "copilot_meeting_insight",
+      copilotmeetinginsight: "copilot_meeting_insight",
+      "copilot-conversation": "copilot_conversation",
+      copilotconversation: "copilot_conversation",
+      "copilot-usage-report": "copilot_usage_report",
+      copilotusagereport: "copilot_usage_report",
+      "copilot-package": "copilot_package",
+      copilotpackage: "copilot_package"
+    };
+    const lookupKey = aliases[normalizedEntity] ?? normalizedEntity;
+    const recommendedToolsByEntity = {
+      user: ["graph_users_query", "microsoft_graph_get", "graph_api_request"],
+      group: ["graph_groups_query", "microsoft_graph_get", "graph_api_request"],
+      application: ["graph_applications_query", "microsoft_graph_get", "graph_api_request"],
+      device: ["graph_devices_query", "microsoft_graph_get", "graph_api_request"],
+      site: ["graph_sites_query", "microsoft_graph_get", "graph_api_request"],
+      message: ["graph_mail_messages", "microsoft_graph_get", "graph_api_request"],
+      event: ["graph_calendar_events", "microsoft_graph_get", "graph_api_request"],
+      copilot: ["copilot_api_capabilities", "copilot_retrieval_query", "copilot_search_query"],
+      copilot_interaction: ["copilot_interactions_list", "copilot_change_notifications_create_subscription", "graph_api_request"],
+      copilot_meeting_insight: ["copilot_meeting_insights_list", "copilot_meeting_insight_get", "graph_api_request"],
+      copilot_conversation: ["copilot_chat_create_conversation", "copilot_chat_send_message", "copilot_chat_send_message_stream"],
+      copilot_usage_report: ["copilot_usage_report_user_count_summary", "copilot_usage_report_user_count_trend", "copilot_usage_report_user_detail"],
+      copilot_package: ["copilot_packages_list", "copilot_package_get", "copilot_package_update"]
+    };
     const schema = {
       user: {
         entity: "user",
@@ -409,19 +516,53 @@ export class GraphServiceClient {
         entity: "event",
         properties: ["id", "subject", "start", "end", "organizer", "location", "isAllDay"],
         relationships: ["attendees", "extensions", "calendar"]
+      },
+      copilot: {
+        entity: "copilot",
+        properties: ["id", "createdDateTime", "lastModifiedDateTime", "tenantId", "userId"],
+        relationships: ["interactions", "conversations", "reports", "packages"]
+      },
+      copilot_interaction: {
+        entity: "copilot_interaction",
+        properties: ["id", "createdDateTime", "requestText", "responseText", "appClass", "scenario"],
+        relationships: ["user", "resources", "response", "feedback"]
+      },
+      copilot_meeting_insight: {
+        entity: "copilot_meeting_insight",
+        properties: ["id", "createdDateTime", "summary", "meetingNotes", "actionItems", "mentionEvents"],
+        relationships: ["onlineMeeting", "organizer", "participants"]
+      },
+      copilot_conversation: {
+        entity: "copilot_conversation",
+        properties: ["id", "createdDateTime", "lastUpdatedDateTime", "title", "state"],
+        relationships: ["messages", "participants", "contextualResources"]
+      },
+      copilot_usage_report: {
+        entity: "copilot_usage_report",
+        properties: ["reportDate", "period", "enabledUserCount", "activeUserCount", "reportRefreshDate"],
+        relationships: ["users", "tenants"]
+      },
+      copilot_package: {
+        entity: "copilot_package",
+        properties: ["id", "displayName", "description", "state", "owner", "lastModifiedDateTime"],
+        relationships: ["elements", "publisher", "permissions", "assignments"]
       }
     };
 
-    if (!schema[normalizedEntity]) {
+    if (!schema[lookupKey]) {
       return {
-        entity: normalizedEntity || null,
+        entity: lookupKey || null,
         properties: [],
         relationships: [],
+        recommendedTools: [],
         knownEntities: Object.keys(schema)
       };
     }
 
-    return schema[normalizedEntity];
+    return {
+      ...schema[lookupKey],
+      recommendedTools: recommendedToolsByEntity[lookupKey] ?? ["microsoft_graph_get", "graph_api_request"]
+    };
   }
 
   async healthCheck({ userId, tokenId } = {}) {
