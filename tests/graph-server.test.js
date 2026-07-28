@@ -50,6 +50,28 @@ function createGraphClientMock() {
     listKnownCapabilities() {
       return [{ family: "users", examples: ["/users"] }];
     },
+    listSuggestedQueries(prompt) {
+      return {
+        prompt,
+        suggestions: [
+          {
+            description: "Count users in the tenant",
+            method: "GET",
+            path: "/users/$count",
+            query: {},
+            entity: "user",
+            confidence: 1
+          }
+        ]
+      };
+    },
+    listProperties(entity) {
+      return {
+        entity,
+        properties: ["displayName", "id"],
+        relationships: ["memberOf"]
+      };
+    },
     async healthCheck() {
       calls.healthCheck += 1;
       return { ok: true, status: 200 };
@@ -200,6 +222,39 @@ test("graph_api_request normalizes method and path", async () => {
     assert.equal(calls.request.length, 1);
     assert.equal(calls.request[0].method, "GET");
     assert.equal(calls.request[0].path, "/users?$top=1");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("official Microsoft Graph tools are exposed", async () => {
+  const restoreEnv = setEnv({ MCP_ADMIN_AUTH_KEY: "" });
+  try {
+    const { client } = createGraphClientMock();
+    const server = createMcpServer({
+      name: "msoffice-mcp",
+      version: "0.1.0",
+      graphClient: client,
+      appName: "msoffice",
+      defaultUserId: "default",
+      adminAuthKey: "",
+      allowSensitiveOutput: false
+    });
+
+    const suggest = await invokeTool(server, "microsoft_graph_suggest_queries", { prompt: "How many users do we have?" });
+    assert.equal(suggest.payload.ok, true);
+    assert.ok(Array.isArray(suggest.payload.data.suggestions));
+    assert.ok(suggest.payload.data.suggestions.length > 0);
+
+    const properties = await invokeTool(server, "microsoft_graph_list_properties", { entity: "user" });
+    assert.equal(properties.payload.ok, true);
+    assert.equal(properties.payload.data.entity, "user");
+    assert.ok(properties.payload.data.properties.includes("displayName"));
+
+    const readOnly = await invokeTool(server, "microsoft_graph_get", { path: "/users/$count" });
+    assert.equal(readOnly.payload.ok, true);
+    assert.equal(readOnly.payload.data.echoed.method, "GET");
+    assert.equal(readOnly.payload.data.echoed.path, "/users/$count");
   } finally {
     restoreEnv();
   }

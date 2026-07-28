@@ -279,6 +279,151 @@ export class GraphServiceClient {
     ];
   }
 
+  listSuggestedQueries(prompt) {
+    const normalizedPrompt = String(prompt ?? "").trim().toLowerCase();
+    const catalog = [
+      {
+        intent: ["user", "count", "how many"],
+        description: "Count users in the tenant",
+        method: "GET",
+        path: "/users/$count",
+        query: {},
+        entity: "user"
+      },
+      {
+        intent: ["inactive", "sign in", "signin", "last month"],
+        description: "Find inactive users by sign-in time",
+        method: "GET",
+        path: "/users",
+        query: { $filter: "signInActivity/lastSignInDateTime le 2026-06-28T00:00:00Z" },
+        entity: "user"
+      },
+      {
+        intent: ["guest", "users"],
+        description: "Find guest users",
+        method: "GET",
+        path: "/users",
+        query: { $filter: "userType eq 'Guest'" },
+        entity: "user"
+      },
+      {
+        intent: ["group", "member"],
+        description: "List groups",
+        method: "GET",
+        path: "/groups",
+        query: {},
+        entity: "group"
+      },
+      {
+        intent: ["license", "copilot"],
+        description: "Find users assigned a license",
+        method: "GET",
+        path: "/users",
+        query: { $select: "id,displayName,assignedLicenses" },
+        entity: "user"
+      },
+      {
+        intent: ["device"],
+        description: "List devices",
+        method: "GET",
+        path: "/devices",
+        query: {},
+        entity: "device"
+      },
+      {
+        intent: ["application", "app registration"],
+        description: "List applications",
+        method: "GET",
+        path: "/applications",
+        query: {},
+        entity: "application"
+      }
+    ];
+
+    const matches = catalog
+      .map((entry) => ({
+        ...entry,
+        score: entry.intent.reduce((score, token) => score + (normalizedPrompt.includes(token) ? 1 : 0), 0)
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score);
+
+    return {
+      prompt,
+      suggestions: matches.slice(0, 10).map((entry) => ({
+        description: entry.description,
+        method: entry.method,
+        path: entry.path,
+        query: entry.query,
+        entity: entry.entity,
+        confidence: Math.min(1, entry.score / entry.intent.length)
+      }))
+    };
+  }
+
+  listProperties(entity) {
+    const normalizedEntity = String(entity ?? "").trim().toLowerCase();
+    const schema = {
+      user: {
+        entity: "user",
+        properties: [
+          "id",
+          "displayName",
+          "userPrincipalName",
+          "mail",
+          "userType",
+          "accountEnabled",
+          "jobTitle",
+          "department",
+          "createdDateTime",
+          "signInActivity"
+        ],
+        relationships: ["manager", "memberOf", "transitiveMemberOf", "licenseDetails"]
+      },
+      group: {
+        entity: "group",
+        properties: ["id", "displayName", "mailNickname", "description", "groupTypes", "securityEnabled", "mailEnabled"],
+        relationships: ["members", "owners", "transitiveMembers", "sites"]
+      },
+      application: {
+        entity: "application",
+        properties: ["id", "appId", "displayName", "signInAudience", "createdDateTime", "identifierUris"],
+        relationships: ["owners", "passwordCredentials", "requiredResourceAccess"]
+      },
+      device: {
+        entity: "device",
+        properties: ["id", "displayName", "operatingSystem", "operatingSystemVersion", "accountEnabled", "trustType"],
+        relationships: ["registeredOwners", "registeredUsers", "memberOf"]
+      },
+      site: {
+        entity: "site",
+        properties: ["id", "displayName", "webUrl", "createdDateTime", "lastModifiedDateTime"],
+        relationships: ["lists", "drives", "pages"]
+      },
+      message: {
+        entity: "message",
+        properties: ["id", "subject", "from", "toRecipients", "ccRecipients", "receivedDateTime", "isRead"],
+        relationships: ["attachments", "extensions", "reply", "forward"]
+      },
+      event: {
+        entity: "event",
+        properties: ["id", "subject", "start", "end", "organizer", "location", "isAllDay"],
+        relationships: ["attendees", "extensions", "calendar"]
+      }
+    };
+
+    if (!schema[normalizedEntity]) {
+      return {
+        entity: normalizedEntity || null,
+        properties: [],
+        relationships: [],
+        knownEntities: Object.keys(schema)
+      };
+    }
+
+    return schema[normalizedEntity];
+  }
+
   async healthCheck({ userId, tokenId } = {}) {
     const result = await this.request({ method: "GET", path: "/$metadata", userId, tokenId });
     return { ...result, checkedAt: new Date().toISOString() };

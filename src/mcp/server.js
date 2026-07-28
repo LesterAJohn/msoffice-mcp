@@ -215,6 +215,91 @@ export function createMcpServer({ name, version, graphClient, appName, defaultUs
   );
 
   server.tool(
+    "microsoft_graph_suggest_queries",
+    toolText({
+      summary: "Search a curated catalog of Microsoft Graph query examples that match the user's intent.",
+      useWhen: "you need candidate Graph API calls before choosing a request path",
+      doNotUseWhen: "you already know the exact endpoint and want to execute it directly",
+      permissions: "none",
+      environment: "reads from the built-in query example catalog and returns ranked suggestions",
+      parameters: "prompt (required string)",
+      response: "ok/status/data.prompt/data.suggestions with method, path, query, entity, and confidence",
+      failures: "500 if suggestion ranking fails",
+      safety: "",
+      prerequisite: "graph_connection_info",
+      followUp: "microsoft_graph_get or graph_api_request",
+      example: '{"name":"microsoft_graph_suggest_queries","arguments":{"prompt":"How many users do we have?"}}'
+    }),
+    { prompt: z.string().min(1) },
+    withErrorHandling(allowSensitiveOutput, async ({ prompt }) => ({
+      ok: true,
+      status: 200,
+      data: graphClient.listSuggestedQueries(prompt)
+    }))
+  );
+
+  server.tool(
+    "microsoft_graph_list_properties",
+    toolText({
+      summary: "Retrieve the property and relationship schema for a Microsoft Graph entity.",
+      useWhen: "you need schema guidance before constructing a Graph request",
+      doNotUseWhen: "you only need a specific record; use microsoft_graph_get or a dedicated read tool instead",
+      permissions: "none",
+      environment: "returns a curated schema for common Graph identity and directory entities",
+      parameters: "entity (required string)",
+      response: "ok/status/data.entity/data.properties/data.relationships",
+      failures: "500 if schema lookup fails",
+      safety: "",
+      prerequisite: "graph_connection_info",
+      followUp: "microsoft_graph_suggest_queries, microsoft_graph_get",
+      example: '{"name":"microsoft_graph_list_properties","arguments":{"entity":"user"}}'
+    }),
+    { entity: z.string().min(1) },
+    withErrorHandling(allowSensitiveOutput, async ({ entity }) => ({
+      ok: true,
+      status: 200,
+      data: graphClient.listProperties(entity)
+    }))
+  );
+
+  server.tool(
+    "microsoft_graph_get",
+    toolText({
+      summary: "Run a read-only Microsoft Graph API call for any Graph REST path.",
+      useWhen: "you know the exact endpoint and want the official read-only Graph execution path",
+      doNotUseWhen: "you need a write operation; this server intentionally keeps the official Graph surface read-only",
+      permissions: "a valid active Graph token for the selected user",
+      environment: "method is forced to GET and the selected token comes from Vault with default-user fallback",
+      parameters: "path (required string), query (optional object), userId (optional string), tokenId (optional string), useBetaBaseUrl (optional boolean)",
+      response: "ok/status/data plus request metadata and response headers",
+      failures: "400 invalid path, 401 missing/invalid token, 403 upstream authorization failure, 404 resource not found, 429 rate limiting, 5xx upstream or transport failure",
+      safety: "read-only by design",
+      prerequisite: "microsoft_graph_suggest_queries or microsoft_graph_list_properties",
+      followUp: "graph_api_request or dedicated read tools for narrower intent",
+      example: '{"name":"microsoft_graph_get","arguments":{"path":"/users/$count"}}'
+    }),
+    {
+      path: z.string().min(1),
+      query: z.record(z.union([z.string(), z.number(), z.boolean(), z.array(z.string())])).optional(),
+      userId: z.string().min(1).optional(),
+      tokenId: z.string().min(1).optional(),
+      useBetaBaseUrl: z.boolean().optional()
+    },
+    withErrorHandling(allowSensitiveOutput, async ({ path, query, userId, tokenId, useBetaBaseUrl }) => ({
+      ok: true,
+      status: 200,
+      data: await graphClient.request({
+        method: "GET",
+        path,
+        query,
+        userId,
+        tokenId,
+        useBetaBaseUrl
+      })
+    }))
+  );
+
+  server.tool(
     "graph_health_check",
     toolText({
       summary: "Verify Graph reachability using the currently selected user token.",
